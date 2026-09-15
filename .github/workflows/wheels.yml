@@ -37,8 +37,6 @@ jobs:
             runs-on: ubuntu-latest
           - os: linux-aarch64
             runs-on: ubuntu-24.04-arm
-          # the oldest macOS each architecture offers: the wheel is then built,
-          # linked and tested against the very version it claims to support
           - os: macos-arm64
             runs-on: macos-14
             macos-target: "14.0"
@@ -66,9 +64,7 @@ jobs:
         # on Linux auditwheel vendors OpenBLAS and libgfortran into the wheel
         CIBW_BEFORE_ALL_LINUX: "dnf install -y openblas-devel || yum install -y openblas-devel"
 
-        # macOS links Apple's Accelerate and a static Fortran runtime instead (see the
-        # override in pyproject.toml), so only the compiler is needed here and delocate
-        # has nothing to vendor
+        # macOS links Apple's Accelerate and a static Fortran runtime
         CIBW_BEFORE_ALL_MACOS: "brew install gcc"
         CIBW_ENVIRONMENT_MACOS: "OTR_RELEASE_WHEEL=1 MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos-target }}"
 
@@ -122,7 +118,7 @@ jobs:
         path: dist/*.tar.gz
 
   publish:
-    name: "Publish to ${{ github.event_name == 'release' && 'PyPI' || inputs.publish_to }}"
+    name: "Publish"
     needs: [build-wheels, build-sdist]
     if: >-
       github.event_name == 'release' ||

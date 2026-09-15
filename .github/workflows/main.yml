@@ -122,7 +122,7 @@ jobs:
             integer-size: "32"
             cmargs: ""
 
-    name: "Repo • OS ${{ matrix.os }} • Compiler ${{ matrix.compiler }} • Build Type ${{ matrix.build-type }} • ${{ matrix.integer-size }}-bit integers"
+    name: "Repo • OS ${{ matrix.os }} • Compiler ${{ matrix.compiler }} • Build Type ${{ matrix.build-type }}${{ matrix.scenario && format(' ({0})', matrix.scenario) || '' }} • ${{ matrix.integer-size }}-bit integers"
     runs-on: ${{ matrix.runs-on }}
     defaults:
       run:
