@@ -24,7 +24,7 @@ jobs:
       run: pip install black
 
     - name: Check Python formatting
-      run: black --check --diff pyopentrustregion setup.py
+      run: black --check --diff pyopentrustregion
 
     - name: Install clang-format
       run: sudo apt-get update && sudo apt-get install -y clang-format
@@ -181,9 +181,10 @@ jobs:
       if: ${{ contains(matrix.os, 'macos') }}
       run: |
         brew install openblas
-        echo "PKG_CONFIG_PATH=/usr/local/opt/openblas/lib/pkgconfig" >> $GITHUB_ENV
-        echo "LDFLAGS=-L/opt/homebrew/opt/openblas/lib" >> $GITHUB_ENV
-        echo "CPPFLAGS=-I/opt/homebrew/opt/openblas/include" >> $GITHUB_ENV
+        BREW_PREFIX=$(brew --prefix)
+        echo "PKG_CONFIG_PATH=${BREW_PREFIX}/opt/openblas/lib/pkgconfig" >> $GITHUB_ENV
+        echo "LDFLAGS=-L${BREW_PREFIX}/opt/openblas/lib" >> $GITHUB_ENV
+        echo "CPPFLAGS=-I${BREW_PREFIX}/opt/openblas/include" >> $GITHUB_ENV
 
     - name: Install OpenBLAS (32-bit integers) on Linux
       if: ${{ matrix.compiler == 'gnu' && matrix.os == 'linux' && matrix.integer-size == '32' }}
@@ -203,11 +204,11 @@ jobs:
 
     - name: Build & Install OpenTrustRegion (32-bit integers)
       if: ${{ matrix.integer-size == '32' && (matrix.build-type == 'test' || (matrix.build-type == 'install' && matrix.scenario == 'installed'))}}
-      run: CMAKE_FLAGS="-DINTEGER_SIZE=4" pip install ${{github.workspace}}
+      run: pip install -C cmake.define.INTEGER_SIZE=4 ${{github.workspace}}
 
     - name: Build & Install OpenTrustRegion (64-bit integers)
       if: ${{ matrix.integer-size == '64' && (matrix.build-type == 'test' || (matrix.build-type == 'install' && matrix.scenario == 'installed'))}}
-      run: CMAKE_FLAGS="-DINTEGER_SIZE=8" pip install ${{github.workspace}}
+      run: pip install -C cmake.define.INTEGER_SIZE=8 ${{github.workspace}}
 
     - name: Build & Install OpenTrustRegion
       if: ${{ matrix.build-type == 'install' && matrix.scenario == 'editable' }}
@@ -277,7 +278,9 @@ jobs:
     - name: Build & Install OpenTrustRegion with Coverage Flags
       if: ${{ matrix.build-type == 'coverage' }}
       run: |
-        CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Debug -DCMAKE_Fortran_FLAGS='--coverage -g'" pip install ${{github.workspace}}
+        pip install -C cmake.build-type=Debug \
+                    -C "cmake.define.CMAKE_Fortran_FLAGS=--coverage -g" \
+                    -C build-dir=build ${{github.workspace}}
 
     - name: Testing OpenTrustRegion with Coverage
       if: ${{ matrix.build-type == 'coverage' }}
