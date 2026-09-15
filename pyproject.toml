@@ -66,6 +66,21 @@ wheel.exclude = [
     "pyopentrustregion/test_data/**",
 ]
 
+# macOS release wheels link Apple's Accelerate and a static Fortran runtime
+[[tool.scikit-build.overrides]]
+if.env.OTR_RELEASE_WHEEL = true
+if.platform-system = "darwin"
+cmake.define.BUILD_SHARED_LIBS = "ON"
+cmake.define.OpenTrustRegion_ENABLE_XHOST = "OFF"
+cmake.define.OpenTrustRegion_BUILD_TESTING = "OFF"
+cmake.define.INTEGER_SIZE = "4"
+cmake.define.BLA_VENDOR = "Apple"
+cmake.define.CMAKE_Fortran_FLAGS = "-static-libgfortran -static-libgcc -static-libquadmath"
+wheel.exclude = [
+    "pyopentrustregion/testsuite.py",
+    "pyopentrustregion/test_data/**",
+]
+
 # conda-build sets CONDA_BUILD=1 automatically; the conda-forge recipe builds the
 # Fortran library as its own "opentrustregion" package and expects "pyopentrustregion"
 # to contain Python files only, so skip CMake entirely and emit a pure-Python wheel

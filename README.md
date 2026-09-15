@@ -35,7 +35,7 @@ Released versions are available from PyPI:
 pip install pyopentrustregion
 ```
 
-The published wheels are a Python-only distribution: they bundle the solver library together with a vendored BLAS/LAPACK and Fortran runtime, but they do not ship the C header or the CMake package files. Consumers that link OpenTrustRegion through `find_package(OpenTrustRegion)` should install from source as described under *Fortran or C Usage* above.
+The published wheels are a Python-only distribution: they bundle the solver library but not the C header or the CMake package files, so consumers that only call the solver from Python need nothing else. On Linux the wheels vendor OpenBLAS and the Fortran runtime; on macOS they link Apple's Accelerate framework and a static Fortran runtime instead, so they depend on nothing outside the system. Consumers that link OpenTrustRegion through `find_package(OpenTrustRegion)` should install from source as described under *Fortran or C Usage* above.
 
 To install from a source checkout instead:
 

@@ -37,10 +37,14 @@ jobs:
             runs-on: ubuntu-latest
           - os: linux-aarch64
             runs-on: ubuntu-24.04-arm
+          # the oldest macOS each architecture offers: the wheel is then built,
+          # linked and tested against the very version it claims to support
           - os: macos-arm64
-            runs-on: macos-latest
+            runs-on: macos-14
+            macos-target: "14.0"
           - os: macos-x86_64
             runs-on: macos-15-intel
+            macos-target: "15.0"
 
     steps:
     - name: Checkout OpenTrustRegion
@@ -59,10 +63,14 @@ jobs:
         # the Fortran testsuite library and excludes the testsuite from the wheel
         CIBW_ENVIRONMENT: "OTR_RELEASE_WHEEL=1"
 
-        # BLAS/LAPACK and gfortran must exist at build time; auditwheel and delocate
-        # then vendor them into the wheel
+        # on Linux auditwheel vendors OpenBLAS and libgfortran into the wheel
         CIBW_BEFORE_ALL_LINUX: "dnf install -y openblas-devel || yum install -y openblas-devel"
-        CIBW_BEFORE_ALL_MACOS: "brew install gcc openblas"
+
+        # macOS links Apple's Accelerate and a static Fortran runtime instead (see the
+        # override in pyproject.toml), so only the compiler is needed here and delocate
+        # has nothing to vendor
+        CIBW_BEFORE_ALL_MACOS: "brew install gcc"
+        CIBW_ENVIRONMENT_MACOS: "OTR_RELEASE_WHEEL=1 MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos-target }}"
 
         # the full testsuite cannot run against a published wheel, so drive the
         # public API instead and check that the numbers come out right
