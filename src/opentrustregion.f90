@@ -225,10 +225,13 @@ module opentrustregion
 
     ! derived type which bundles the callback functions of the plain interfaces so
     ! that these can be passed as a context to the context-carrying entry points
+    ! the component names carry a suffix since a component whose name matches the
+    ! name of a dummy argument of the same interface family makes nvfortran reject
+    ! the procedure pointer as a type mismatch
     type :: plain_callbacks_type
-        procedure(update_orbs_type), pointer, nopass :: update_orbs => null()
-        procedure(obj_func_type), pointer, nopass :: obj_func => null()
-        procedure(hess_x_type), pointer, nopass :: hess_x => null()
+        procedure(update_orbs_type), pointer, nopass :: update_orbs_plain => null()
+        procedure(obj_func_type), pointer, nopass :: obj_func_plain => null()
+        procedure(hess_x_type), pointer, nopass :: hess_x_plain => null()
     end type
 
     ! derived type for solver settings
@@ -334,8 +337,8 @@ contains
         end if
 
         ! bundle the plain callback functions into a context
-        callbacks%update_orbs => update_orbs
-        callbacks%obj_func => obj_func
+        callbacks%update_orbs_plain => update_orbs
+        callbacks%obj_func_plain => obj_func
 
         ! point to the shims which unpack the context and call the plain callback
         ! functions
@@ -701,7 +704,7 @@ contains
         end if
 
         ! bundle the plain callback function into a context
-        callbacks%hess_x => hess_x_funptr
+        callbacks%hess_x_plain => hess_x_funptr
 
         ! point to the shim which unpacks the context and calls the plain callback
         ! function
@@ -991,12 +994,12 @@ contains
         select type (callbacks => context)
         type is (plain_callbacks_type)
             ! call the plain callback function
-            call callbacks%update_orbs(kappa, func, grad, h_diag, &
-                                       plain_hess_x_funptr, error)
+            call callbacks%update_orbs_plain(kappa, func, grad, h_diag, &
+                                             plain_hess_x_funptr, error)
 
             ! store the returned Hessian linear transformation in the context and
             ! return the shim which calls it
-            callbacks%hess_x => plain_hess_x_funptr
+            callbacks%hess_x_plain => plain_hess_x_funptr
             hess_x_funptr => plain_hess_x
         class default
             error = 1
@@ -1022,7 +1025,7 @@ contains
         ! plain callback function
         select type (callbacks => context)
         type is (plain_callbacks_type)
-            func = callbacks%obj_func(kappa, error)
+            func = callbacks%obj_func_plain(kappa, error)
         class default
             error = 1
         end select
@@ -1044,7 +1047,7 @@ contains
         ! plain callback function
         select type (callbacks => context)
         type is (plain_callbacks_type)
-            call callbacks%hess_x(x, hess_x, error)
+            call callbacks%hess_x_plain(x, hess_x, error)
         class default
             error = 1
         end select
@@ -1362,7 +1365,7 @@ contains
         procedure(obj_func_ctx_type), pointer :: obj_func_ctx_funptr
 
         ! bundle the plain callback function into a context
-        callbacks%obj_func => obj_func
+        callbacks%obj_func_plain => obj_func
 
         ! point to the shim which unpacks the context and calls the plain callback
         ! function
@@ -2102,7 +2105,7 @@ contains
         procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
 
         ! bundle the plain callback function into a context
-        callbacks%hess_x => hess_x_funptr
+        callbacks%hess_x_plain => hess_x_funptr
 
         ! point to the shim which unpacks the context and calls the plain callback
         ! function
@@ -2166,7 +2169,7 @@ contains
         procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
 
         ! bundle the plain callback function into a context
-        callbacks%hess_x => hess_x_funptr
+        callbacks%hess_x_plain => hess_x_funptr
 
         ! point to the shim which unpacks the context and calls the plain callback
         ! function
@@ -2561,8 +2564,8 @@ contains
         procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
 
         ! bundle the plain callback functions into a context
-        callbacks%obj_func => obj_func
-        callbacks%hess_x => hess_x_funptr
+        callbacks%obj_func_plain => obj_func
+        callbacks%hess_x_plain => hess_x_funptr
 
         ! point to the shims which unpack the context and call the plain callback
         ! functions
@@ -2879,8 +2882,8 @@ contains
         procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
 
         ! bundle the plain callback functions into a context
-        callbacks%obj_func => obj_func
-        callbacks%hess_x => hess_x_funptr
+        callbacks%obj_func_plain => obj_func
+        callbacks%hess_x_plain => hess_x_funptr
 
         ! point to the shims which unpack the context and call the plain callback
         ! functions

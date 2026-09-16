@@ -3218,7 +3218,7 @@ contains
         test_plain_update_orbs = .true.
 
         ! bundle the plain callback function into a context
-        callbacks%update_orbs => update_orbs
+        callbacks%update_orbs_plain => update_orbs
 
         ! initialize variables and variable update
         curr_vars = minimum1
@@ -3253,7 +3253,7 @@ contains
 
         ! check whether the Hessian linear transformation of the plain callback
         ! function was stored in the context and the corresponding shim is returned
-        if (.not. associated(callbacks%hess_x, hess_x_fun)) then
+        if (.not. associated(callbacks%hess_x_plain, hess_x_fun)) then
             write (stderr, *) "test_plain_update_orbs failed: Hessian linear "// &
                 "transformation of plain callback function not stored in context."
             test_plain_update_orbs = .false.
@@ -3292,7 +3292,7 @@ contains
         test_plain_obj_func = .true.
 
         ! bundle the plain callback function into a context
-        callbacks%obj_func => obj_func
+        callbacks%obj_func_plain => obj_func
 
         ! initialize variables and variable update
         curr_vars = minimum1
@@ -3338,7 +3338,7 @@ contains
         test_plain_hess_x = .true.
 
         ! bundle the plain callback function into a context
-        callbacks%hess_x => hess_x_fun
+        callbacks%hess_x_plain => hess_x_fun
 
         ! initialize Hessian used by the plain callback function and trial vector
         call hartmann6d_hessian(minimum1)
