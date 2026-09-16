@@ -185,10 +185,13 @@ subroutine update_orbs(context, kappa, func, grad, h_diag, hess_x_funptr, error)
 end subroutine update_orbs
 ```
 
-- The context is passed to `solver_ctx` as an argument and is never stored in the settings object, so concurrent solves do not share state.
+- The context is passed to `solver_ctx` as an argument and is never stored by the library, so this feature adds no shared state of its own.
+- The context dummy arguments carry the `target` attribute even though nothing in the library points at the context. This is an affordance for a host program which wants to keep a pointer to its own context inside a callback function, which is only valid if the actual argument passed by the host program has the `target` attribute as well.
 - The abstract interfaces `update_orbs_ctx_type`, `obj_func_ctx_type`, `hess_x_ctx_type`, `precond_ctx_type`, `project_ctx_type`, and `conv_check_ctx_type` describe the context-carrying callback functions. The logging function needs no host data and therefore has no context-carrying counterpart.
 - The optional callback functions are supplied as the `precond_ctx`, `project_ctx`, and `conv_check_ctx` settings instead of `precond`, `project`, and `conv_check`. Setting both flavours of the same callback function is refused with an error rather than silently resolved.
 - `solver` is a thin adapter which bundles the callback functions of the plain interfaces into a context and calls `solver_ctx`, so both entry points run the same algorithm.
+- Since that bundle is the context which `solver` passes to the callback functions, the context-carrying flavours of the optional callback functions require a context-carrying entry point: `solver` refuses to run when `precond_ctx`, `project_ctx`, `conv_check_ctx`, `stability_settings%precond_ctx`, or `stability_settings%project_ctx` is set, and `stability_check` refuses to run when `precond_ctx` or `project_ctx` is set.
+- The reverse combination is supported: `solver_ctx` and `stability_check_ctx` accept the plain `precond`, `project`, and `conv_check` callback functions, which are called without a context.
 
 ---
 

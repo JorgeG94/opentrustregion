@@ -1002,6 +1002,8 @@ contains
             callbacks%hess_x_plain => plain_hess_x_funptr
             hess_x_funptr => plain_hess_x
         class default
+            func = 0.0_rp
+            hess_x_funptr => null()
             error = 1
         end select
 
@@ -2122,7 +2124,7 @@ contains
                                               solution, eigval, corr_vector, &
                                               hess_vector, settings, error)
         !
-        ! this subroutine performs the Jacobi-Davidson correction but also returns the 
+        ! this subroutine performs the Jacobi-Davidson correction but also returns the
         ! Hessian linear transformation since this can be reused, its callback function
         ! receives an opaque host context as its first argument
         !
@@ -2589,7 +2591,7 @@ contains
                                           jacobi_davidson_started, &
                                           max_precision_reached, error)
         !
-        ! this subroutine performs level-shifted (Jacobi-)Davidson to solve the trust 
+        ! this subroutine performs level-shifted (Jacobi-)Davidson to solve the trust
         ! region subproblem, its callback functions receive an opaque host context as
         ! their first argument
         !
@@ -2904,7 +2906,7 @@ contains
                                                 settings, trust_radius, solution, &
                                                 imicro, max_precision_reached, error)
         !
-        ! this subroutine performs truncated conjugate gradient to solve the trust 
+        ! this subroutine performs truncated conjugate gradient to solve the trust
         ! region subproblem, its callback functions receive an opaque host context as
         ! their first argument
         !
