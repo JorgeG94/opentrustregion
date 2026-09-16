@@ -59,6 +59,10 @@ module opentrustregion_unit_tests
     ! guard that triggers when the reduced space reaches the full space size
     real(rp) :: overflow_hess(n_param, n_param), overflow_grad(n_param)
 
+    ! define global invocation counters for the optional callback functions of the
+    ! plain interfaces which cannot count invocations in a context
+    integer(ip) :: n_plain_precond = 0, n_plain_project = 0
+
     ! derived type which holds all data of the 6D Hartmann function so that this can
     ! be supplied to the callback functions through a context instead of through
     ! module-level variables, it also counts callback function invocations
@@ -492,8 +496,9 @@ contains
         ! initialize error flag
         error = 0
 
-        ! project onto the full parameter space which leaves the vector unchanged and
-        ! recover the host data from the context
+        ! project onto the full parameter space which leaves the vector unchanged, the
+        ! self-assignment silences the warning for the unused argument, and recover
+        ! the host data from the context
         vector = vector
         select type (host => context)
         type is (hartmann6d_context_type)
@@ -592,6 +597,47 @@ contains
 
     end subroutine mock_project_ctx
 
+    subroutine unit_diag_precond(residual, mu, precond_residual, error)
+        !
+        ! this subroutine is a test subroutine for the preconditioner subroutine of
+        ! the plain interface, it reproduces the level-shifted diagonal
+        ! preconditioner for a unit Hessian diagonal and counts its own invocations
+        !
+        real(rp), intent(in), target :: residual(:)
+        real(rp), intent(in) :: mu
+        real(rp), intent(out), target :: precond_residual(:)
+        integer(ip), intent(out) :: error
+
+        ! initialize error flag
+        error = 0
+
+        ! count the invocation and scale the residual with a level-shifted unit
+        ! Hessian diagonal which stays positive for any level shift
+        n_plain_precond = n_plain_precond + 1
+        precond_residual = residual/(1.0_rp + abs(mu))
+
+    end subroutine unit_diag_precond
+
+    subroutine full_space_project(vector, error)
+        !
+        ! this subroutine is a test subroutine for the projection subroutine of the
+        ! plain interface which projects onto the full parameter space and therefore
+        ! leaves the vector unchanged and counts its own invocations
+        !
+        real(rp), intent(inout), target :: vector(:)
+        integer(ip), intent(out) :: error
+
+        ! initialize error flag
+        error = 0
+
+        ! count the invocation and project onto the full parameter space which leaves
+        ! the vector unchanged, the self-assignment silences the warning for the
+        ! unused argument
+        n_plain_project = n_plain_project + 1
+        vector = vector
+
+    end subroutine full_space_project
+
     logical(c_bool) function test_solver() bind(C)
         !
         ! this function tests the solver subroutine
@@ -599,7 +645,8 @@ contains
         use opentrustregion, only: update_orbs_type, obj_func_type, &
                                    solver_settings_type, solver, &
                                    default_settings => default_solver_settings, &
-                                   error_solver_max_iter
+                                   error_solver, error_solver_max_iter, &
+                                   missing_context_error_msg
 
         real(rp), parameter :: var_thres = 1e-6_rp
         integer(ip) :: error
@@ -725,6 +772,39 @@ contains
             test_solver = .false.
         end if
 
+        ! supply a context-carrying optional callback function and check that this is
+        ! refused since this entry point passes its own bundle of plain callback
+        ! functions as the context
+        call setup_settings(settings)
+        settings%precond_ctx => hartmann6d_precond_ctx
+        call solver(update_orbs_funptr, obj_func_funptr, n_param, error, settings)
+        if (error /= error_solver + 1) then
+            write (stderr, *) "test_solver failed: Did not return error for "// &
+                "context-carrying preconditioner."
+            test_solver = .false.
+        end if
+        if (index(log_message, trim(missing_context_error_msg)) == 0) then
+            write (stderr, *) "test_solver failed: Did not log error for "// &
+                "context-carrying preconditioner."
+            test_solver = .false.
+        end if
+
+        ! do the same for a context-carrying optional callback function of the nested
+        ! stability check settings
+        call setup_settings(settings)
+        settings%stability_settings%project_ctx => hartmann6d_project_ctx
+        call solver(update_orbs_funptr, obj_func_funptr, n_param, error, settings)
+        if (error /= error_solver + 1) then
+            write (stderr, *) "test_solver failed: Did not return error for "// &
+                "context-carrying projection of the nested stability check settings."
+            test_solver = .false.
+        end if
+        if (index(log_message, trim(missing_context_error_msg)) == 0) then
+            write (stderr, *) "test_solver failed: Did not log error for "// &
+                "context-carrying projection of the nested stability check settings."
+            test_solver = .false.
+        end if
+
         ! deallocate space for the gradient
         deallocate(final_grad)
 
@@ -735,7 +815,9 @@ contains
         ! this function tests the stability check subroutine
         !
         use opentrustregion, only: hess_x_type, stability_settings_type, &
-                                   stability_check, error_stability_check_max_iter
+                                   stability_check, error_stability_check, &
+                                   error_stability_check_max_iter, &
+                                   missing_context_error_msg
 
         real(rp) :: vars(6), h_diag(6), direction(6)
         procedure(hess_x_type), pointer :: hess_x_funptr
@@ -839,6 +921,23 @@ contains
             write (stderr, *) "test_stability_check failed: Stability check does "// &
                 "not return correct direction for saddle point when reduced space "// &
                 "grows to dimension of full parameter space."
+            test_stability_check = .false.
+        end if
+
+        ! supply a context-carrying optional callback function and check that this is
+        ! refused since this entry point passes its own bundle of plain callback
+        ! functions as the context
+        call setup_settings(settings)
+        settings%precond_ctx => hartmann6d_precond_ctx
+        call stability_check(h_diag, hess_x_funptr, stable, error, settings, direction)
+        if (error /= error_stability_check + 1) then
+            write (stderr, *) "test_stability_check failed: Did not return error "// &
+                "for context-carrying preconditioner."
+            test_stability_check = .false.
+        end if
+        if (index(log_message, trim(missing_context_error_msg)) == 0) then
+            write (stderr, *) "test_stability_check failed: Did not log error for "// &
+                "context-carrying preconditioner."
             test_stability_check = .false.
         end if
 
@@ -3008,6 +3107,88 @@ contains
             test_solver_ctx = .false.
         end if
 
+        ! check that the callback function pointers of the settings object are
+        ! unchanged since the solver only reads them
+        if (.not. associated(settings%precond_ctx, hartmann6d_precond_ctx) .or. &
+            .not. associated(settings%project_ctx, hartmann6d_project_ctx) .or. &
+            .not. associated(settings%conv_check_ctx, hartmann6d_conv_check_ctx)) then
+            write (stderr, *) "test_solver_ctx failed: Context-carrying optional "// &
+                "callback functions of the settings object were modified."
+            test_solver_ctx = .false.
+        end if
+        if (associated(settings%precond) .or. associated(settings%project) .or. &
+            associated(settings%conv_check)) then
+            write (stderr, *) "test_solver_ctx failed: Optional callback "// &
+                "functions of the plain interfaces were associated by the solver."
+            test_solver_ctx = .false.
+        end if
+
+        ! supply the preconditioner, the projection and the convergence check through
+        ! the plain interfaces instead, which the context-carrying solver supports
+        ! since these callback functions expect no context
+        host = hartmann6d_context_type()
+        host%vars = [0.20_rp, 0.15_rp, 0.48_rp, 0.28_rp, 0.31_rp, 0.66_rp]
+        call setup_settings(settings)
+        settings%precond => unit_diag_precond
+        settings%project => full_space_project
+        settings%conv_check => mock_conv_check
+        n_plain_precond = 0
+        n_plain_project = 0
+
+        ! run solver, check if error has occured, check whether the optional callback
+        ! functions of the plain interfaces were called and check whether gradient is
+        ! zero
+        call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, &
+                        settings)
+        if (error /= 0) then
+            write (stderr, *) "test_solver_ctx failed: Produced error for optional "// &
+                "callback functions of the plain interfaces."
+            test_solver_ctx = .false.
+        end if
+        if (n_plain_precond == 0 .or. n_plain_project == 0) then
+            write (stderr, *) "test_solver_ctx failed: Optional callback functions "// &
+                "of the plain interfaces were not called."
+            test_solver_ctx = .false.
+        end if
+        call hartmann6d_gradient(host%vars, final_grad)
+        if (norm2(final_grad)/sqrt(real(n_param, kind=rp)) > &
+            default_settings%conv_tol) then
+            write (stderr, *) "test_solver_ctx failed: Solver did not find "// &
+                "stationary point for optional callback functions of the plain "// &
+                "interfaces."
+            test_solver_ctx = .false.
+        end if
+
+        ! request a stability check and supply the context-carrying preconditioner
+        ! and projection, which the solver has to pass on to the nested stability
+        ! check settings
+        host = hartmann6d_context_type()
+        host%vars = [0.20_rp, 0.15_rp, 0.48_rp, 0.28_rp, 0.31_rp, 0.66_rp]
+        call setup_settings(settings)
+        settings%stability = .true.
+        settings%precond_ctx => hartmann6d_precond_ctx
+        settings%project_ctx => hartmann6d_project_ctx
+
+        ! run solver, check if error has occured and check whether the
+        ! context-carrying callback functions were inherited by the nested stability
+        ! check settings
+        call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, &
+                        settings)
+        if (error /= 0) then
+            write (stderr, *) "test_solver_ctx failed: Produced error for "// &
+                "stability check with context-carrying optional callback functions."
+            test_solver_ctx = .false.
+        end if
+        if (.not. associated(settings%stability_settings%precond_ctx, &
+                             hartmann6d_precond_ctx) .or. &
+            .not. associated(settings%stability_settings%project_ctx, &
+                             hartmann6d_project_ctx)) then
+            write (stderr, *) "test_solver_ctx failed: Context-carrying optional "// &
+                "callback functions were not inherited by the nested stability "// &
+                "check settings."
+            test_solver_ctx = .false.
+        end if
+
         ! remove the required callback functions and check that the missing callback
         ! functions are reported
         call setup_settings(settings)
@@ -3159,6 +3340,41 @@ contains
             test_stability_check_ctx = .false.
         end if
 
+        ! supply the preconditioner and the projection through the plain interfaces,
+        ! which the context-carrying stability check supports since these callback
+        ! functions expect no context
+        call setup_settings(settings)
+        settings%precond => unit_diag_precond
+        settings%project => full_space_project
+        n_plain_precond = 0
+        n_plain_project = 0
+
+        ! run stability check, check if error has occured, check whether the optional
+        ! callback functions of the plain interfaces were called and determine whether
+        ! the returned direction is correct
+        call stability_check_ctx(h_diag, hess_x_funptr, host, stable, error, settings, &
+                                 direction)
+        if (error /= 0) then
+            write (stderr, *) "test_stability_check_ctx failed: Produced error for "// &
+                "optional callback functions of the plain interfaces."
+            test_stability_check_ctx = .false.
+        end if
+        if (n_plain_precond == 0 .or. n_plain_project == 0) then
+            write (stderr, *) "test_stability_check_ctx failed: Optional callback "// &
+                "functions of the plain interfaces were not called."
+            test_stability_check_ctx = .false.
+        end if
+        if (abs(abs(dot_product(direction, &
+                                [-0.173375920238_rp, -0.518489821791_rp, &
+                                 -6.432848975252e-3_rp, -0.340127852882_rp, &
+                                 3.066460316955e-3_rp, 0.765095650196_rp])) - 1.0_rp) &
+            > tol) then
+            write (stderr, *) "test_stability_check_ctx failed: Stability check "// &
+                "does not return correct direction for saddle point for optional "// &
+                "callback functions of the plain interfaces."
+            test_stability_check_ctx = .false.
+        end if
+
         ! remove the required callback function and check that the missing callback
         ! function is reported
         call setup_settings(settings)
@@ -3219,6 +3435,9 @@ contains
 
         ! bundle the plain callback function into a context
         callbacks%update_orbs_plain => update_orbs
+
+        ! initialize the returned Hessian linear transformation
+        hess_x_funptr => null()
 
         ! initialize variables and variable update
         curr_vars = minimum1
