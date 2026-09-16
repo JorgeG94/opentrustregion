@@ -317,6 +317,22 @@ contains
         procedure(update_orbs_ctx_type), pointer :: update_orbs_ctx_funptr
         procedure(obj_func_ctx_type), pointer :: obj_func_ctx_funptr
 
+        ! initialize error flag
+        error = 0
+
+        ! the context of this entry point is the bundle of plain callback functions,
+        ! so a context-carrying optional callback function cannot be supplied with the
+        ! host context it expects
+        if (associated(settings%precond_ctx) .or. &
+            associated(settings%project_ctx) .or. &
+            associated(settings%conv_check_ctx) .or. &
+            associated(settings%stability_settings%precond_ctx) .or. &
+            associated(settings%stability_settings%project_ctx)) then
+            call settings%log(missing_context_error_msg, verbosity_error, .true.)
+            error = error_solver + 1
+            return
+        end if
+
         ! bundle the plain callback functions into a context
         callbacks%update_orbs => update_orbs
         callbacks%obj_func => obj_func
@@ -384,6 +400,20 @@ contains
         end if
         if (.not. associated(obj_func)) then
             call settings%log(unassociated_obj_func_error_msg, verbosity_error, .true.)
+            error = error_solver + 1
+            return
+        end if
+
+        ! refuse an ambiguous preconditioner
+        if (associated(settings%precond) .and. associated(settings%precond_ctx)) then
+            call settings%log(ambiguous_precond_error_msg, verbosity_error, .true.)
+            error = error_solver + 1
+            return
+        end if
+
+        ! refuse an ambiguous projection
+        if (associated(settings%project) .and. associated(settings%project_ctx)) then
+            call settings%log(ambiguous_project_error_msg, verbosity_error, .true.)
             error = error_solver + 1
             return
         end if
@@ -657,6 +687,19 @@ contains
         type(plain_callbacks_type), target :: callbacks
         procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
 
+        ! initialize error flag
+        error = 0
+
+        ! the context of this entry point is the bundle of plain callback functions,
+        ! so a context-carrying optional callback function cannot be supplied with the
+        ! host context it expects
+        if (associated(settings%precond_ctx) .or. &
+            associated(settings%project_ctx)) then
+            call settings%log(missing_context_error_msg, verbosity_error, .true.)
+            error = error_stability_check + 1
+            return
+        end if
+
         ! bundle the plain callback function into a context
         callbacks%hess_x => hess_x_funptr
 
@@ -715,6 +758,20 @@ contains
         ! ensure the required callback function is provided
         if (.not. associated(hess_x_funptr)) then
             call settings%log(unassociated_hess_x_error_msg, verbosity_error, .true.)
+            error = error_stability_check + 1
+            return
+        end if
+
+        ! refuse an ambiguous preconditioner
+        if (associated(settings%precond) .and. associated(settings%precond_ctx)) then
+            call settings%log(ambiguous_precond_error_msg, verbosity_error, .true.)
+            error = error_stability_check + 1
+            return
+        end if
+
+        ! refuse an ambiguous projection
+        if (associated(settings%project) .and. associated(settings%project_ctx)) then
+            call settings%log(ambiguous_project_error_msg, verbosity_error, .true.)
             error = error_stability_check + 1
             return
         end if
@@ -1887,14 +1944,10 @@ contains
         ! assume no user-defined preconditioner is provided
         applied = .false.
 
-        ! refuse ambiguity between the two preconditioner interfaces
-        if (associated(settings%precond) .and. associated(settings%precond_ctx)) then
-            call settings%log(ambiguous_precond_error_msg, verbosity_error, .true.)
-            error = 1
-            return
-        end if
-
-        ! a context-carrying preconditioner can only be called with a context
+        ! a context-carrying preconditioner can only be called with a context, this
+        ! is unreachable from a public entry point since these refuse a
+        ! context-carrying callback function without a context and is only kept as a
+        ! safeguard
         if (associated(settings%precond_ctx) .and. .not. present(context)) then
             call settings%log(missing_context_error_msg, verbosity_error, .true.)
             error = 1
@@ -1928,14 +1981,9 @@ contains
         ! initialize error flag
         error = 0
 
-        ! refuse ambiguity between the two projection interfaces
-        if (associated(settings%project) .and. associated(settings%project_ctx)) then
-            call settings%log(ambiguous_project_error_msg, verbosity_error, .true.)
-            error = 1
-            return
-        end if
-
-        ! a context-carrying projection can only be called with a context
+        ! a context-carrying projection can only be called with a context, this is
+        ! unreachable from a public entry point since these refuse a context-carrying
+        ! callback function without a context and is only kept as a safeguard
         if (associated(settings%project_ctx) .and. .not. present(context)) then
             call settings%log(missing_context_error_msg, verbosity_error, .true.)
             error = 1

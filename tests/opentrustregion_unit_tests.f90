@@ -3030,6 +3030,32 @@ contains
             test_solver_ctx = .false.
         end if
 
+        ! provide both preconditioner interfaces and check that the ambiguity is
+        ! refused
+        call setup_settings(settings)
+        obj_func_funptr => obj_func_ctx
+        settings%precond => mock_precond
+        settings%precond_ctx => hartmann6d_precond_ctx
+        call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, &
+                        settings)
+        if (error /= error_solver + 1) then
+            write (stderr, *) "test_solver_ctx failed: Did not return error for "// &
+                "ambiguous preconditioner."
+            test_solver_ctx = .false.
+        end if
+
+        ! provide both projection interfaces and check that the ambiguity is refused
+        call setup_settings(settings)
+        settings%project => mock_project
+        settings%project_ctx => hartmann6d_project_ctx
+        call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, &
+                        settings)
+        if (error /= error_solver + 1) then
+            write (stderr, *) "test_solver_ctx failed: Did not return error for "// &
+                "ambiguous projection."
+            test_solver_ctx = .false.
+        end if
+
         ! provide both convergence check interfaces and check that the ambiguity is
         ! refused
         call setup_settings(settings)
@@ -3142,6 +3168,32 @@ contains
         if (error /= error_stability_check + 1) then
             write (stderr, *) "test_stability_check_ctx failed: Did not return "// &
                 "error for unassociated hess_x callback function."
+            test_stability_check_ctx = .false.
+        end if
+
+        ! provide both preconditioner interfaces and check that the ambiguity is
+        ! refused
+        call setup_settings(settings)
+        hess_x_funptr => hess_x_fun_ctx
+        settings%precond => mock_precond
+        settings%precond_ctx => hartmann6d_precond_ctx
+        call stability_check_ctx(h_diag, hess_x_funptr, host, stable, error, settings, &
+                                 direction)
+        if (error /= error_stability_check + 1) then
+            write (stderr, *) "test_stability_check_ctx failed: Did not return "// &
+                "error for ambiguous preconditioner."
+            test_stability_check_ctx = .false.
+        end if
+
+        ! provide both projection interfaces and check that the ambiguity is refused
+        call setup_settings(settings)
+        settings%project => mock_project
+        settings%project_ctx => hartmann6d_project_ctx
+        call stability_check_ctx(h_diag, hess_x_funptr, host, stable, error, settings, &
+                                 direction)
+        if (error /= error_stability_check + 1) then
+            write (stderr, *) "test_stability_check_ctx failed: Did not return "// &
+                "error for ambiguous projection."
             test_stability_check_ctx = .false.
         end if
 
@@ -3323,7 +3375,6 @@ contains
         ! preconditioner
         !
         use opentrustregion, only: solver_settings_type, apply_precond, &
-                                   ambiguous_precond_error_msg, &
                                    missing_context_error_msg
 
         real(rp) :: vector(3), precond_vector(3)
@@ -3411,24 +3462,6 @@ contains
             test_apply_precond = .false.
         end if
 
-        ! call subroutine with preconditioners of both interfaces and check that the
-        ! ambiguity is refused
-        call setup_settings(settings)
-        settings%precond => mock_precond
-        settings%precond_ctx => mock_precond_ctx
-        call apply_precond(settings, vector, mu, precond_vector, applied, error, &
-                           context=host)
-        if (error /= 1) then
-            write (stderr, *) "test_apply_precond failed: Did not return error for "// &
-                "ambiguous preconditioner."
-            test_apply_precond = .false.
-        end if
-        if (index(log_message, trim(ambiguous_precond_error_msg)) == 0) then
-            write (stderr, *) "test_apply_precond failed: Did not log error for "// &
-                "ambiguous preconditioner."
-            test_apply_precond = .false.
-        end if
-
     end function test_apply_precond
 
     logical(c_bool) function test_apply_project() bind(C)
@@ -3436,7 +3469,6 @@ contains
         ! this function tests the subroutine which applies the user-defined projection
         !
         use opentrustregion, only: solver_settings_type, apply_project, &
-                                   ambiguous_project_error_msg, &
                                    missing_context_error_msg
 
         real(rp) :: vector(3)
@@ -3519,24 +3551,6 @@ contains
         if (index(log_message, trim(missing_context_error_msg)) == 0) then
             write (stderr, *) "test_apply_project failed: Did not log error for "// &
                 "missing context."
-            test_apply_project = .false.
-        end if
-
-        ! call subroutine with projections of both interfaces and check that the
-        ! ambiguity is refused
-        call setup_settings(settings)
-        settings%project => mock_project
-        settings%project_ctx => mock_project_ctx
-        vector = initial_vector
-        call apply_project(settings, vector, error, context=host)
-        if (error /= 1) then
-            write (stderr, *) "test_apply_project failed: Did not return error for "// &
-                "ambiguous projection."
-            test_apply_project = .false.
-        end if
-        if (index(log_message, trim(ambiguous_project_error_msg)) == 0) then
-            write (stderr, *) "test_apply_project failed: Did not log error for "// &
-                "ambiguous projection."
             test_apply_project = .false.
         end if
 
