@@ -59,6 +59,21 @@ module opentrustregion_unit_tests
     ! guard that triggers when the reduced space reaches the full space size
     real(rp) :: overflow_hess(n_param, n_param), overflow_grad(n_param)
 
+    ! derived type which holds all data of the 6D Hartmann function so that this can
+    ! be supplied to the callback functions through a context instead of through
+    ! module-level variables, it also counts callback function invocations
+    type :: hartmann6d_context_type
+        real(rp) :: vars(n_param) = 0.0_rp, hess(n_param, n_param) = 0.0_rp
+        integer(ip) :: n_hess_x = 0, n_precond = 0, n_project = 0, n_conv_check = 0
+    end type
+
+    ! derived type which is used to check that a context reaches the context-carrying
+    ! callback functions unchanged
+    type :: mock_context_type
+        real(rp) :: scaling = 1.0_rp
+        integer(ip) :: n_calls = 0
+    end type
+
 contains
 
     ! 6D Hartmann function definition
@@ -311,6 +326,271 @@ contains
         deallocate(work)
 
     end subroutine diagonalize_test_matrix
+
+    ! callback functions of the context-carrying interfaces
+
+    function hartmann6d_hess_matrix(vars) result(hessian)
+        !
+        ! this function defines the Hartmann 6D function's Hessian and returns it
+        ! instead of writing it to a module-level variable so that it can be stored in
+        ! a context
+        !
+        real(rp), intent(in) :: vars(:)
+        real(rp) :: hessian(n_param, n_param)
+        real(rp) :: exp_term(n_terms)
+        integer(ip) :: i, j
+
+        do i = 1, n_terms
+            exp_term(i) = exp(-sum(A(i, :)*(vars - P(i, :))**2))
+        end do
+
+        do i = 1, n_param
+            hessian(i, i) = 2.0_rp*sum(alpha*A(:, i)*exp_term* &
+                                       (1.0_rp - 2.0_rp*A(:, i)*(vars(i) - P(:, i))**2))
+            do j = 1, i - 1
+                hessian(i, j) = -4.0_rp*sum(alpha*A(:, i)*A(:, j)* &
+                                            (vars(i) - P(:, i))* &
+                                            (vars(j) - P(:, j))*exp_term)
+                hessian(j, i) = hessian(i, j)
+            end do
+        end do
+
+    end function hartmann6d_hess_matrix
+
+    subroutine hess_x_fun_ctx(context, x, hess_x, error)
+        !
+        ! this subroutine describes the Hessian linear transformation operation for
+        ! the Hartmann 6D function with the Hessian supplied through the context
+        !
+        class(*), intent(inout), target :: context
+        real(rp), intent(in), target :: x(:)
+        real(rp), intent(out), target :: hess_x(:)
+        integer(ip), intent(out) :: error
+
+        ! initialize error flag
+        error = 0
+
+        ! recover the host data from the context
+        select type (host => context)
+        type is (hartmann6d_context_type)
+            host%n_hess_x = host%n_hess_x + 1
+            hess_x = matmul(host%hess, x)
+        class default
+            error = 1
+        end select
+
+    end subroutine hess_x_fun_ctx
+
+    function obj_func_ctx(context, delta_vars, error) result(func)
+        !
+        ! this function describes the objective function evaluation for the Hartmann
+        ! 6D function with the current variables supplied through the context
+        !
+        class(*), intent(inout), target :: context
+        real(rp), intent(in), target :: delta_vars(:)
+        integer(ip), intent(out) :: error
+        real(rp) :: func
+
+        ! initialize error flag
+        error = 0
+
+        ! initialize objective function
+        func = 0.0_rp
+
+        ! recover the host data from the context
+        select type (host => context)
+        type is (hartmann6d_context_type)
+            func = hartmann6d_func(host%vars + delta_vars)
+        class default
+            error = 1
+        end select
+
+    end function obj_func_ctx
+
+    subroutine update_orbs_ctx(context, delta_vars, func, grad, h_diag, &
+                               hess_x_funptr, error)
+        !
+        ! this subroutine describes the orbital update equivalent for the Hartmann 6D
+        ! function with all host data supplied through the context
+        !
+        use opentrustregion, only: hess_x_ctx_type
+
+        class(*), intent(inout), target :: context
+        real(rp), intent(in), target :: delta_vars(:)
+        real(rp), intent(out) :: func
+        real(rp), intent(out), target :: grad(:), h_diag(:)
+        procedure(hess_x_ctx_type), intent(out), pointer :: hess_x_funptr
+        integer(ip), intent(out) :: error
+
+        integer(ip) :: i
+
+        ! initialize error flag
+        error = 0
+
+        ! recover the host data from the context, update the variables stored in the
+        ! context and evaluate function, gradient and Hessian
+        select type (host => context)
+        type is (hartmann6d_context_type)
+            host%vars = host%vars + delta_vars
+            func = hartmann6d_func(host%vars)
+            call hartmann6d_gradient(host%vars, grad)
+            host%hess = hartmann6d_hess_matrix(host%vars)
+            h_diag = [(host%hess(i, i), i=1, size(h_diag))]
+        class default
+            error = 1
+        end select
+
+        ! define Hessian linear transformation
+        hess_x_funptr => hess_x_fun_ctx
+
+    end subroutine update_orbs_ctx
+
+    subroutine hartmann6d_precond_ctx(context, residual, mu, precond_residual, error)
+        !
+        ! this subroutine is a test subroutine for the context-carrying
+        ! preconditioner subroutine, it reproduces the level-shifted diagonal
+        ! preconditioner from the Hessian stored in the context
+        !
+        class(*), intent(inout), target :: context
+        real(rp), intent(in), target :: residual(:)
+        real(rp), intent(in) :: mu
+        real(rp), intent(out), target :: precond_residual(:)
+        integer(ip), intent(out) :: error
+
+        real(rp) :: denominator(n_param)
+        integer(ip) :: i
+        real(rp), parameter :: floor = 1e-10_rp
+
+        ! initialize error flag
+        error = 0
+
+        ! recover the host data from the context
+        select type (host => context)
+        type is (hartmann6d_context_type)
+            host%n_precond = host%n_precond + 1
+            denominator = [(host%hess(i, i), i=1, n_param)] - mu
+            where (abs(denominator) < floor)
+                denominator = floor
+            end where
+            precond_residual = residual/denominator
+        class default
+            error = 1
+        end select
+
+    end subroutine hartmann6d_precond_ctx
+
+    subroutine hartmann6d_project_ctx(context, vector, error)
+        !
+        ! this subroutine is a test subroutine for the context-carrying projection
+        ! subroutine, it projects onto the full parameter space and therefore leaves
+        ! the vector unchanged
+        !
+        class(*), intent(inout), target :: context
+        real(rp), intent(inout), target :: vector(:)
+        integer(ip), intent(out) :: error
+
+        ! initialize error flag
+        error = 0
+
+        ! project onto the full parameter space which leaves the vector unchanged and
+        ! recover the host data from the context
+        vector = vector
+        select type (host => context)
+        type is (hartmann6d_context_type)
+            host%n_project = host%n_project + 1
+        class default
+            error = 1
+        end select
+
+    end subroutine hartmann6d_project_ctx
+
+    function hartmann6d_conv_check_ctx(context, error) result(converged)
+        !
+        ! this function is a test function for the context-carrying convergence check
+        ! function, it never signals convergence
+        !
+        class(*), intent(inout), target :: context
+        integer(ip), intent(out) :: error
+        logical :: converged
+
+        ! initialize error flag
+        error = 0
+
+        ! never signal convergence
+        converged = .false.
+
+        ! recover the host data from the context
+        select type (host => context)
+        type is (hartmann6d_context_type)
+            host%n_conv_check = host%n_conv_check + 1
+        class default
+            error = 1
+        end select
+
+    end function hartmann6d_conv_check_ctx
+
+    function mock_conv_check(error) result(converged)
+        !
+        ! this function is a test function for the convergence check function, it
+        ! never signals convergence
+        !
+        integer(ip), intent(out) :: error
+        logical :: converged
+
+        converged = .false.
+
+        error = 0
+
+    end function mock_conv_check
+
+    subroutine mock_precond_ctx(context, residual, mu, precond_residual, error)
+        !
+        ! this subroutine is a test subroutine for the context-carrying
+        ! preconditioner subroutine, it scales the residual with a factor supplied
+        ! through the context
+        !
+        class(*), intent(inout), target :: context
+        real(rp), intent(in), target :: residual(:)
+        real(rp), intent(in) :: mu
+        real(rp), intent(out), target :: precond_residual(:)
+        integer(ip), intent(out) :: error
+
+        ! initialize error flag
+        error = 0
+
+        ! recover the scaling factor from the context
+        select type (host => context)
+        type is (mock_context_type)
+            host%n_calls = host%n_calls + 1
+            precond_residual = host%scaling*mu*residual
+        class default
+            error = 1
+        end select
+
+    end subroutine mock_precond_ctx
+
+    subroutine mock_project_ctx(context, vector, error)
+        !
+        ! this subroutine is a test subroutine for the context-carrying projection
+        ! subroutine, it scales the vector with a factor supplied through the context
+        !
+        class(*), intent(inout), target :: context
+        real(rp), intent(inout), target :: vector(:)
+        integer(ip), intent(out) :: error
+
+        ! initialize error flag
+        error = 0
+
+        ! recover the scaling factor from the context
+        select type (host => context)
+        type is (mock_context_type)
+            host%n_calls = host%n_calls + 1
+            vector = host%scaling*vector
+        class default
+            error = 1
+        end select
+
+    end subroutine mock_project_ctx
 
     logical(c_bool) function test_solver() bind(C)
         !
@@ -2629,5 +2909,637 @@ contains
         end if
 
     end function test_string_to_lowercase
+
+    logical(c_bool) function test_solver_ctx() bind(C)
+        !
+        ! this function tests the context-carrying solver subroutine
+        !
+        use opentrustregion, only: update_orbs_ctx_type, obj_func_ctx_type, &
+                                   solver_settings_type, solver_ctx, &
+                                   default_settings => default_solver_settings, &
+                                   error_solver, project_warning_msg
+
+        real(rp), parameter :: var_thres = 1e-6_rp
+        integer(ip) :: error
+        real(rp), allocatable :: final_grad(:)
+        procedure(update_orbs_ctx_type), pointer :: update_orbs_funptr
+        procedure(obj_func_ctx_type), pointer :: obj_func_funptr
+        type(hartmann6d_context_type) :: host
+        type(solver_settings_type) :: settings
+
+        ! assume tests pass
+        test_solver_ctx = .true.
+
+        ! allocate space for the final gradient
+        allocate(final_grad(n_param))
+
+        ! supply the starting point through the context and start in the quadratic
+        ! region near the minimum
+        host = hartmann6d_context_type()
+        host%vars = [0.20_rp, 0.15_rp, 0.48_rp, 0.28_rp, 0.31_rp, 0.66_rp]
+        update_orbs_funptr => update_orbs_ctx
+        obj_func_funptr => obj_func_ctx
+
+        ! initialize settings
+        call settings%init(error)
+
+        ! run solver, check if error has occured, check whether the callback functions
+        ! received the context and check whether gradient is zero and agrees with
+        ! correct minimum
+        call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, &
+                        settings)
+        if (error /= 0) then
+            write (stderr, *) "test_solver_ctx failed: Produced error."
+            test_solver_ctx = .false.
+        end if
+        if (host%n_hess_x == 0) then
+            write (stderr, *) "test_solver_ctx failed: Hessian linear "// &
+                "transformation returned through the context was not called."
+            test_solver_ctx = .false.
+        end if
+        call hartmann6d_gradient(host%vars, final_grad)
+        if (norm2(final_grad)/sqrt(real(n_param, kind=rp)) > &
+            default_settings%conv_tol) then
+            write (stderr, *) "test_solver_ctx failed: Solver did not find "// &
+                "stationary point."
+            test_solver_ctx = .false.
+        end if
+        if (any(abs(host%vars - minimum1) > var_thres)) then
+            write (stderr, *) "test_solver_ctx failed: Solver did not find correct "// &
+                "minimum."
+            test_solver_ctx = .false.
+        end if
+
+        ! supply the preconditioner, the projection and the convergence check through
+        ! the context-carrying interfaces as well
+        host = hartmann6d_context_type()
+        host%vars = [0.20_rp, 0.15_rp, 0.48_rp, 0.28_rp, 0.31_rp, 0.66_rp]
+        call setup_settings(settings)
+        settings%precond_ctx => hartmann6d_precond_ctx
+        settings%project_ctx => hartmann6d_project_ctx
+        settings%conv_check_ctx => hartmann6d_conv_check_ctx
+
+        ! run solver, check if error has occured, check whether all context-carrying
+        ! callback functions were called with the context, check whether the warning
+        ! for a custom projection is logged and check whether gradient is zero
+        call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, &
+                        settings)
+        if (error /= 0) then
+            write (stderr, *) "test_solver_ctx failed: Produced error for "// &
+                "context-carrying optional callback functions."
+            test_solver_ctx = .false.
+        end if
+        if (host%n_precond == 0 .or. host%n_project == 0 .or. &
+            host%n_conv_check == 0) then
+            write (stderr, *) "test_solver_ctx failed: Context-carrying optional "// &
+                "callback functions were not called with the context."
+            test_solver_ctx = .false.
+        end if
+        if (index(log_message, trim(project_warning_msg)) == 0) then
+            write (stderr, *) "test_solver_ctx failed: Warning for custom "// &
+                "projection was not logged for context-carrying projection."
+            test_solver_ctx = .false.
+        end if
+        call hartmann6d_gradient(host%vars, final_grad)
+        if (norm2(final_grad)/sqrt(real(n_param, kind=rp)) > &
+            default_settings%conv_tol) then
+            write (stderr, *) "test_solver_ctx failed: Solver did not find "// &
+                "stationary point for context-carrying optional callback functions."
+            test_solver_ctx = .false.
+        end if
+
+        ! remove the required callback functions and check that the missing callback
+        ! functions are reported
+        call setup_settings(settings)
+        update_orbs_funptr => null()
+        obj_func_funptr => obj_func_ctx
+        call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, &
+                        settings)
+        if (error /= error_solver + 1) then
+            write (stderr, *) "test_solver_ctx failed: Did not return error for "// &
+                "unassociated update_orbs callback function."
+            test_solver_ctx = .false.
+        end if
+        update_orbs_funptr => update_orbs_ctx
+        obj_func_funptr => null()
+        call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, &
+                        settings)
+        if (error /= error_solver + 1) then
+            write (stderr, *) "test_solver_ctx failed: Did not return error for "// &
+                "unassociated obj_func callback function."
+            test_solver_ctx = .false.
+        end if
+
+        ! provide both convergence check interfaces and check that the ambiguity is
+        ! refused
+        call setup_settings(settings)
+        obj_func_funptr => obj_func_ctx
+        settings%conv_check => mock_conv_check
+        settings%conv_check_ctx => hartmann6d_conv_check_ctx
+        call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, &
+                        settings)
+        if (error /= error_solver + 1) then
+            write (stderr, *) "test_solver_ctx failed: Did not return error for "// &
+                "ambiguous convergence check."
+            test_solver_ctx = .false.
+        end if
+
+        ! deallocate space for the gradient
+        deallocate(final_grad)
+
+    end function test_solver_ctx
+
+    logical(c_bool) function test_stability_check_ctx() bind(C)
+        !
+        ! this function tests the context-carrying stability check subroutine
+        !
+        use opentrustregion, only: hess_x_ctx_type, stability_settings_type, &
+                                   stability_check_ctx, error_stability_check
+
+        real(rp) :: h_diag(n_param), direction(n_param)
+        procedure(hess_x_ctx_type), pointer :: hess_x_funptr
+        logical :: stable
+        integer(ip) :: error, i
+        type(hartmann6d_context_type) :: host
+        type(stability_settings_type) :: settings
+
+        ! assume tests pass
+        test_stability_check_ctx = .true.
+
+        ! supply the Hessian at the minimum through the context and determine Hessian
+        ! diagonal
+        host = hartmann6d_context_type()
+        host%vars = minimum1
+        host%hess = hartmann6d_hess_matrix(host%vars)
+        h_diag = [(host%hess(i, i), i=1, n_param)]
+        hess_x_funptr => hess_x_fun_ctx
+
+        ! initialize settings
+        call settings%init(error)
+
+        ! run stability check, check if error has occured, check whether the callback
+        ! function received the context and determine whether minimum is stable and
+        ! the returned direction vanishes
+        call stability_check_ctx(h_diag, hess_x_funptr, host, stable, error, settings, &
+                                 direction)
+        if (error /= 0) then
+            write (stderr, *) "test_stability_check_ctx failed: Produced error."
+            test_stability_check_ctx = .false.
+        end if
+        if (host%n_hess_x == 0) then
+            write (stderr, *) "test_stability_check_ctx failed: Hessian linear "// &
+                "transformation was not called with the context."
+            test_stability_check_ctx = .false.
+        end if
+        if (.not. stable) then
+            write (stderr, *) "test_stability_check_ctx failed: Stability check "// &
+                "incorrectly classifies stability of minimum."
+            test_stability_check_ctx = .false.
+        end if
+        if (all(abs(direction) > tol)) then
+            write (stderr, *) "test_stability_check_ctx failed: Stability check "// &
+                "does not return zero vector for minimum."
+            test_stability_check_ctx = .false.
+        end if
+
+        ! supply the Hessian at the saddle point through the context and determine
+        ! Hessian diagonal
+        host = hartmann6d_context_type()
+        host%vars = saddle_point
+        host%hess = hartmann6d_hess_matrix(host%vars)
+        h_diag = [(host%hess(i, i), i=1, n_param)]
+
+        ! run stability check, check if error has occured and determine whether saddle
+        ! point is unstable and the returned direction is correct
+        call stability_check_ctx(h_diag, hess_x_funptr, host, stable, error, settings, &
+                                 direction)
+        if (error /= 0) then
+            write (stderr, *) "test_stability_check_ctx failed: Produced error for "// &
+                "saddle point."
+            test_stability_check_ctx = .false.
+        end if
+        if (stable) then
+            write (stderr, *) "test_stability_check_ctx failed: Stability check "// &
+                "incorrectly classifies stability of saddle point."
+            test_stability_check_ctx = .false.
+        end if
+        if (abs(abs(dot_product(direction, &
+                                [-0.173375920238_rp, -0.518489821791_rp, &
+                                 -6.432848975252e-3_rp, -0.340127852882_rp, &
+                                 3.066460316955e-3_rp, 0.765095650196_rp])) - 1.0_rp) &
+            > tol) then
+            write (stderr, *) "test_stability_check_ctx failed: Stability check "// &
+                "does not return correct direction for saddle point."
+            test_stability_check_ctx = .false.
+        end if
+
+        ! remove the required callback function and check that the missing callback
+        ! function is reported
+        call setup_settings(settings)
+        hess_x_funptr => null()
+        call stability_check_ctx(h_diag, hess_x_funptr, host, stable, error, settings, &
+                                 direction)
+        if (error /= error_stability_check + 1) then
+            write (stderr, *) "test_stability_check_ctx failed: Did not return "// &
+                "error for unassociated hess_x callback function."
+            test_stability_check_ctx = .false.
+        end if
+
+    end function test_stability_check_ctx
+
+    logical(c_bool) function test_plain_update_orbs() bind(C)
+        !
+        ! this function tests the shim which adapts a callback function of the plain
+        ! update_orbs interface onto the context-carrying interface
+        !
+        use opentrustregion, only: hess_x_ctx_type, plain_callbacks_type, &
+                                   plain_update_orbs, plain_hess_x
+
+        real(rp) :: delta_vars(n_param), func, grad(n_param), h_diag(n_param), &
+                    ref_grad(n_param), ref_hess(n_param, n_param)
+        procedure(hess_x_ctx_type), pointer :: hess_x_funptr
+        integer(ip) :: error, i
+        type(plain_callbacks_type), target :: callbacks
+        type(mock_context_type) :: wrong_context
+
+        ! assume tests pass
+        test_plain_update_orbs = .true.
+
+        ! bundle the plain callback function into a context
+        callbacks%update_orbs => update_orbs
+
+        ! initialize variables and variable update
+        curr_vars = minimum1
+        delta_vars = 0.1_rp
+
+        ! call shim and check if error has occured
+        call plain_update_orbs(callbacks, delta_vars, func, grad, h_diag, &
+                               hess_x_funptr, error)
+        if (error /= 0) then
+            write (stderr, *) "test_plain_update_orbs failed: Produced error."
+            test_plain_update_orbs = .false.
+        end if
+
+        ! check whether the quantities of the plain callback function are returned
+        call hartmann6d_gradient(minimum1 + delta_vars, ref_grad)
+        ref_hess = hartmann6d_hess_matrix(minimum1 + delta_vars)
+        if (abs(func - hartmann6d_func(minimum1 + delta_vars)) > tol) then
+            write (stderr, *) "test_plain_update_orbs failed: Objective function "// &
+                "of plain callback function not returned."
+            test_plain_update_orbs = .false.
+        end if
+        if (any(abs(grad - ref_grad) > tol)) then
+            write (stderr, *) "test_plain_update_orbs failed: Gradient of plain "// &
+                "callback function not returned."
+            test_plain_update_orbs = .false.
+        end if
+        if (any(abs(h_diag - [(ref_hess(i, i), i=1, n_param)]) > tol)) then
+            write (stderr, *) "test_plain_update_orbs failed: Hessian diagonal of "// &
+                "plain callback function not returned."
+            test_plain_update_orbs = .false.
+        end if
+
+        ! check whether the Hessian linear transformation of the plain callback
+        ! function was stored in the context and the corresponding shim is returned
+        if (.not. associated(callbacks%hess_x, hess_x_fun)) then
+            write (stderr, *) "test_plain_update_orbs failed: Hessian linear "// &
+                "transformation of plain callback function not stored in context."
+            test_plain_update_orbs = .false.
+        end if
+        if (.not. associated(hess_x_funptr, plain_hess_x)) then
+            write (stderr, *) "test_plain_update_orbs failed: Shim for Hessian "// &
+                "linear transformation not returned."
+            test_plain_update_orbs = .false.
+        end if
+
+        ! call shim with a context which does not describe plain callback functions
+        ! and check that this is reported
+        call plain_update_orbs(wrong_context, delta_vars, func, grad, h_diag, &
+                               hess_x_funptr, error)
+        if (error == 0) then
+            write (stderr, *) "test_plain_update_orbs failed: Did not return error "// &
+                "for wrong context type."
+            test_plain_update_orbs = .false.
+        end if
+
+    end function test_plain_update_orbs
+
+    logical(c_bool) function test_plain_obj_func() bind(C)
+        !
+        ! this function tests the shim which adapts a callback function of the plain
+        ! obj_func interface onto the context-carrying interface
+        !
+        use opentrustregion, only: plain_callbacks_type, plain_obj_func
+
+        real(rp) :: delta_vars(n_param), func
+        integer(ip) :: error
+        type(plain_callbacks_type), target :: callbacks
+        type(mock_context_type) :: wrong_context
+
+        ! assume tests pass
+        test_plain_obj_func = .true.
+
+        ! bundle the plain callback function into a context
+        callbacks%obj_func => obj_func
+
+        ! initialize variables and variable update
+        curr_vars = minimum1
+        delta_vars = 0.1_rp
+
+        ! call shim and check if error has occured and whether the objective function
+        ! of the plain callback function is returned
+        func = plain_obj_func(callbacks, delta_vars, error)
+        if (error /= 0) then
+            write (stderr, *) "test_plain_obj_func failed: Produced error."
+            test_plain_obj_func = .false.
+        end if
+        if (abs(func - hartmann6d_func(minimum1 + delta_vars)) > tol) then
+            write (stderr, *) "test_plain_obj_func failed: Objective function of "// &
+                "plain callback function not returned."
+            test_plain_obj_func = .false.
+        end if
+
+        ! call shim with a context which does not describe plain callback functions
+        ! and check that this is reported
+        func = plain_obj_func(wrong_context, delta_vars, error)
+        if (error == 0) then
+            write (stderr, *) "test_plain_obj_func failed: Did not return error "// &
+                "for wrong context type."
+            test_plain_obj_func = .false.
+        end if
+
+    end function test_plain_obj_func
+
+    logical(c_bool) function test_plain_hess_x() bind(C)
+        !
+        ! this function tests the shim which adapts a callback function of the plain
+        ! hess_x interface onto the context-carrying interface
+        !
+        use opentrustregion, only: plain_callbacks_type, plain_hess_x
+
+        real(rp) :: x(n_param), hess_x(n_param), ref_hess(n_param, n_param)
+        integer(ip) :: error
+        type(plain_callbacks_type), target :: callbacks
+        type(mock_context_type) :: wrong_context
+
+        ! assume tests pass
+        test_plain_hess_x = .true.
+
+        ! bundle the plain callback function into a context
+        callbacks%hess_x => hess_x_fun
+
+        ! initialize Hessian used by the plain callback function and trial vector
+        call hartmann6d_hessian(minimum1)
+        ref_hess = hartmann6d_hess_matrix(minimum1)
+        x = 0.5_rp
+
+        ! call shim and check if error has occured and whether the Hessian linear
+        ! transformation of the plain callback function is returned
+        call plain_hess_x(callbacks, x, hess_x, error)
+        if (error /= 0) then
+            write (stderr, *) "test_plain_hess_x failed: Produced error."
+            test_plain_hess_x = .false.
+        end if
+        if (any(abs(hess_x - matmul(ref_hess, x)) > tol)) then
+            write (stderr, *) "test_plain_hess_x failed: Hessian linear "// &
+                "transformation of plain callback function not returned."
+            test_plain_hess_x = .false.
+        end if
+
+        ! call shim with a context which does not describe plain callback functions
+        ! and check that this is reported
+        call plain_hess_x(wrong_context, x, hess_x, error)
+        if (error == 0) then
+            write (stderr, *) "test_plain_hess_x failed: Did not return error for "// &
+                "wrong context type."
+            test_plain_hess_x = .false.
+        end if
+
+    end function test_plain_hess_x
+
+    logical(c_bool) function test_apply_precond() bind(C)
+        !
+        ! this function tests the subroutine which applies the user-defined
+        ! preconditioner
+        !
+        use opentrustregion, only: solver_settings_type, apply_precond, &
+                                   ambiguous_precond_error_msg, &
+                                   missing_context_error_msg
+
+        real(rp) :: vector(3), precond_vector(3)
+        real(rp), parameter :: mu = 2.0_rp
+        logical :: applied
+        integer(ip) :: error
+        type(mock_context_type) :: host
+        type(solver_settings_type) :: settings
+
+        ! assume tests pass
+        test_apply_precond = .true.
+
+        ! initialize quantities
+        vector = [1.0_rp, 2.0_rp, 3.0_rp]
+
+        ! setup settings object
+        call setup_settings(settings)
+
+        ! call subroutine without any preconditioner and check that no preconditioner
+        ! was applied
+        call apply_precond(settings, vector, mu, precond_vector, applied, error)
+        if (error /= 0) then
+            write (stderr, *) "test_apply_precond failed: Returned error when no "// &
+                "preconditioner is provided."
+            test_apply_precond = .false.
+        end if
+        if (applied) then
+            write (stderr, *) "test_apply_precond failed: Reported applied "// &
+                "preconditioner when none is provided."
+            test_apply_precond = .false.
+        end if
+
+        ! call subroutine with preconditioner of the plain interface and check if
+        ! results match
+        settings%precond => mock_precond
+        call apply_precond(settings, vector, mu, precond_vector, applied, error)
+        if (error /= 0) then
+            write (stderr, *) "test_apply_precond failed: Returned error for "// &
+                "preconditioner of plain interface."
+            test_apply_precond = .false.
+        end if
+        if (.not. applied .or. any(abs(precond_vector - mu*vector) > tol)) then
+            write (stderr, *) "test_apply_precond failed: Preconditioner of plain "// &
+                "interface not applied."
+            test_apply_precond = .false.
+        end if
+
+        ! call subroutine with preconditioner of the context-carrying interface and
+        ! check whether the context was passed through
+        call setup_settings(settings)
+        settings%precond_ctx => mock_precond_ctx
+        host = mock_context_type(scaling=3.0_rp, n_calls=0)
+        call apply_precond(settings, vector, mu, precond_vector, applied, error, &
+                           context=host)
+        if (error /= 0) then
+            write (stderr, *) "test_apply_precond failed: Returned error for "// &
+                "preconditioner of context-carrying interface."
+            test_apply_precond = .false.
+        end if
+        if (.not. applied .or. &
+            any(abs(precond_vector - host%scaling*mu*vector) > tol)) then
+            write (stderr, *) "test_apply_precond failed: Preconditioner of "// &
+                "context-carrying interface not applied with context."
+            test_apply_precond = .false.
+        end if
+        if (host%n_calls /= 1) then
+            write (stderr, *) "test_apply_precond failed: Preconditioner of "// &
+                "context-carrying interface did not modify context."
+            test_apply_precond = .false.
+        end if
+
+        ! call subroutine with preconditioner of the context-carrying interface but
+        ! without context and check that this is reported
+        call setup_settings(settings)
+        settings%precond_ctx => mock_precond_ctx
+        call apply_precond(settings, vector, mu, precond_vector, applied, error)
+        if (error /= 1) then
+            write (stderr, *) "test_apply_precond failed: Did not return error for "// &
+                "missing context."
+            test_apply_precond = .false.
+        end if
+        if (index(log_message, trim(missing_context_error_msg)) == 0) then
+            write (stderr, *) "test_apply_precond failed: Did not log error for "// &
+                "missing context."
+            test_apply_precond = .false.
+        end if
+
+        ! call subroutine with preconditioners of both interfaces and check that the
+        ! ambiguity is refused
+        call setup_settings(settings)
+        settings%precond => mock_precond
+        settings%precond_ctx => mock_precond_ctx
+        call apply_precond(settings, vector, mu, precond_vector, applied, error, &
+                           context=host)
+        if (error /= 1) then
+            write (stderr, *) "test_apply_precond failed: Did not return error for "// &
+                "ambiguous preconditioner."
+            test_apply_precond = .false.
+        end if
+        if (index(log_message, trim(ambiguous_precond_error_msg)) == 0) then
+            write (stderr, *) "test_apply_precond failed: Did not log error for "// &
+                "ambiguous preconditioner."
+            test_apply_precond = .false.
+        end if
+
+    end function test_apply_precond
+
+    logical(c_bool) function test_apply_project() bind(C)
+        !
+        ! this function tests the subroutine which applies the user-defined projection
+        !
+        use opentrustregion, only: solver_settings_type, apply_project, &
+                                   ambiguous_project_error_msg, &
+                                   missing_context_error_msg
+
+        real(rp) :: vector(3)
+        real(rp), parameter :: initial_vector(3) = [1.0_rp, 2.0_rp, 3.0_rp]
+        integer(ip) :: error
+        type(mock_context_type) :: host
+        type(solver_settings_type) :: settings
+
+        ! assume tests pass
+        test_apply_project = .true.
+
+        ! setup settings object
+        call setup_settings(settings)
+
+        ! call subroutine without any projection and check that the vector is
+        ! unchanged
+        vector = initial_vector
+        call apply_project(settings, vector, error)
+        if (error /= 0) then
+            write (stderr, *) "test_apply_project failed: Returned error when no "// &
+                "projection is provided."
+            test_apply_project = .false.
+        end if
+        if (any(abs(vector - initial_vector) > tol)) then
+            write (stderr, *) "test_apply_project failed: Modified vector when no "// &
+                "projection is provided."
+            test_apply_project = .false.
+        end if
+
+        ! call subroutine with projection of the plain interface and check if results
+        ! match
+        settings%project => mock_project
+        vector = initial_vector
+        call apply_project(settings, vector, error)
+        if (error /= 0) then
+            write (stderr, *) "test_apply_project failed: Returned error for "// &
+                "projection of plain interface."
+            test_apply_project = .false.
+        end if
+        if (any(abs(vector - 2*initial_vector) > tol)) then
+            write (stderr, *) "test_apply_project failed: Projection of plain "// &
+                "interface not applied."
+            test_apply_project = .false.
+        end if
+
+        ! call subroutine with projection of the context-carrying interface and check
+        ! whether the context was passed through
+        call setup_settings(settings)
+        settings%project_ctx => mock_project_ctx
+        host = mock_context_type(scaling=3.0_rp, n_calls=0)
+        vector = initial_vector
+        call apply_project(settings, vector, error, context=host)
+        if (error /= 0) then
+            write (stderr, *) "test_apply_project failed: Returned error for "// &
+                "projection of context-carrying interface."
+            test_apply_project = .false.
+        end if
+        if (any(abs(vector - host%scaling*initial_vector) > tol)) then
+            write (stderr, *) "test_apply_project failed: Projection of "// &
+                "context-carrying interface not applied with context."
+            test_apply_project = .false.
+        end if
+        if (host%n_calls /= 1) then
+            write (stderr, *) "test_apply_project failed: Projection of "// &
+                "context-carrying interface did not modify context."
+            test_apply_project = .false.
+        end if
+
+        ! call subroutine with projection of the context-carrying interface but
+        ! without context and check that this is reported
+        call setup_settings(settings)
+        settings%project_ctx => mock_project_ctx
+        vector = initial_vector
+        call apply_project(settings, vector, error)
+        if (error /= 1) then
+            write (stderr, *) "test_apply_project failed: Did not return error for "// &
+                "missing context."
+            test_apply_project = .false.
+        end if
+        if (index(log_message, trim(missing_context_error_msg)) == 0) then
+            write (stderr, *) "test_apply_project failed: Did not log error for "// &
+                "missing context."
+            test_apply_project = .false.
+        end if
+
+        ! call subroutine with projections of both interfaces and check that the
+        ! ambiguity is refused
+        call setup_settings(settings)
+        settings%project => mock_project
+        settings%project_ctx => mock_project_ctx
+        vector = initial_vector
+        call apply_project(settings, vector, error, context=host)
+        if (error /= 1) then
+            write (stderr, *) "test_apply_project failed: Did not return error for "// &
+                "ambiguous projection."
+            test_apply_project = .false.
+        end if
+        if (index(log_message, trim(ambiguous_project_error_msg)) == 0) then
+            write (stderr, *) "test_apply_project failed: Did not log error for "// &
+                "ambiguous projection."
+            test_apply_project = .false.
+        end if
+
+    end function test_apply_project
 
 end module opentrustregion_unit_tests
