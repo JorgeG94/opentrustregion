@@ -61,6 +61,25 @@ module opentrustregion
         gram_schmidt_lin_dep_error_msg = &
             "Vector passed to Gram-Schmidt procedure is linearly dependent on "// &
             "previously orthonormalized vectors.", &
+        ambiguous_precond_error_msg = &
+            "Both a plain and a context-carrying preconditioner are provided. Only "// &
+            "one of precond and precond_ctx can be set.", &
+        ambiguous_project_error_msg = &
+            "Both a plain and a context-carrying projection function are provided. "// &
+            "Only one of project and project_ctx can be set.", &
+        ambiguous_conv_check_error_msg = &
+            "Both a plain and a context-carrying convergence check are provided. "// &
+            "Only one of conv_check and conv_check_ctx can be set.", &
+        missing_context_error_msg = &
+            "A context-carrying callback function is provided but no context is "// &
+            "available. Context-carrying callback functions require the solver_ctx "// &
+            "or stability_check_ctx entry points.", &
+        unassociated_update_orbs_error_msg = &
+            "The update_orbs callback function pointer is not associated.", &
+        unassociated_obj_func_error_msg = &
+            "The obj_func callback function pointer is not associated.", &
+        unassociated_hess_x_error_msg = &
+            "The hess_x callback function pointer is not associated.", &
         project_warning_msg = &
             "Custom projection is provided. To optimize performance, OTR assumes "// &
             "that all other provided routines (update_orbs, hess_x, precond) are "// &
@@ -80,6 +99,17 @@ module opentrustregion
     end interface
 
     abstract interface
+        subroutine hess_x_ctx_type(context, x, hess_x, error)
+            import :: rp, ip
+
+            class(*), intent(inout), target :: context
+            real(rp), intent(in), target :: x(:)
+            real(rp), intent(out), target :: hess_x(:)
+            integer(ip), intent(out) :: error
+        end subroutine hess_x_ctx_type
+    end interface
+
+    abstract interface
         subroutine update_orbs_type(kappa, func, grad, h_diag, hess_x_funptr, error)
             import :: rp, hess_x_type, ip
 
@@ -92,6 +122,20 @@ module opentrustregion
     end interface
 
     abstract interface
+        subroutine update_orbs_ctx_type(context, kappa, func, grad, h_diag, &
+                                        hess_x_funptr, error)
+            import :: rp, hess_x_ctx_type, ip
+
+            class(*), intent(inout), target :: context
+            real(rp), intent(in), target :: kappa(:)
+            real(rp), intent(out) :: func
+            real(rp), intent(out), target :: grad(:), h_diag(:)
+            procedure(hess_x_ctx_type), intent(out), pointer :: hess_x_funptr
+            integer(ip), intent(out) :: error
+        end subroutine update_orbs_ctx_type
+    end interface
+
+    abstract interface
         function obj_func_type(kappa, error) result(func)
             import :: rp, ip
 
@@ -99,6 +143,17 @@ module opentrustregion
             integer(ip), intent(out) :: error
             real(rp) :: func
         end function obj_func_type
+    end interface
+
+    abstract interface
+        function obj_func_ctx_type(context, kappa, error) result(func)
+            import :: rp, ip
+
+            class(*), intent(inout), target :: context
+            real(rp), intent(in), target :: kappa(:)
+            integer(ip), intent(out) :: error
+            real(rp) :: func
+        end function obj_func_ctx_type
     end interface
 
     abstract interface
@@ -113,12 +168,34 @@ module opentrustregion
     end interface
 
     abstract interface
+        subroutine precond_ctx_type(context, residual, mu, precond_residual, error)
+            import :: rp, ip
+
+            class(*), intent(inout), target :: context
+            real(rp), intent(in), target :: residual(:)
+            real(rp), intent(in) :: mu
+            real(rp), intent(out), target :: precond_residual(:)
+            integer(ip), intent(out) :: error
+        end subroutine precond_ctx_type
+    end interface
+
+    abstract interface
         subroutine project_type(vector, error)
             import :: rp, ip
 
             real(rp), intent(inout), target :: vector(:)
             integer(ip), intent(out) :: error
         end subroutine project_type
+    end interface
+
+    abstract interface
+        subroutine project_ctx_type(context, vector, error)
+            import :: rp, ip
+
+            class(*), intent(inout), target :: context
+            real(rp), intent(inout), target :: vector(:)
+            integer(ip), intent(out) :: error
+        end subroutine project_ctx_type
     end interface
 
     abstract interface
@@ -131,10 +208,28 @@ module opentrustregion
     end interface
 
     abstract interface
+        function conv_check_ctx_type(context, error) result(converged)
+            import :: ip
+
+            class(*), intent(inout), target :: context
+            integer(ip), intent(out) :: error
+            logical :: converged
+        end function conv_check_ctx_type
+    end interface
+
+    abstract interface
         subroutine logger_type(message)
             character(*), intent(in) :: message
         end subroutine logger_type
     end interface
+
+    ! derived type which bundles the callback functions of the plain interfaces so
+    ! that these can be passed as a context to the context-carrying entry points
+    type :: plain_callbacks_type
+        procedure(update_orbs_type), pointer, nopass :: update_orbs => null()
+        procedure(obj_func_type), pointer, nopass :: obj_func => null()
+        procedure(hess_x_type), pointer, nopass :: hess_x => null()
+    end type
 
     ! derived type for solver settings
     type, abstract :: settings_type
@@ -143,6 +238,8 @@ module opentrustregion
         integer(ip) :: n_random_trial_vectors, jacobi_davidson_start, seed, verbose
         procedure(precond_type), pointer, nopass :: precond => null()
         procedure(project_type), pointer, nopass :: project => null()
+        procedure(precond_ctx_type), pointer, nopass :: precond_ctx => null()
+        procedure(project_ctx_type), pointer, nopass :: project_ctx => null()
         procedure(logger_type), pointer, nopass :: logger => null()
     contains
         procedure :: log => print_message
@@ -172,19 +269,24 @@ module opentrustregion
         character(kw_len) :: subsystem_solver
         type(stability_settings_type) :: stability_settings
         procedure(conv_check_type), pointer, nopass :: conv_check => null()
+        procedure(conv_check_ctx_type), pointer, nopass :: conv_check_ctx => null()
     contains
         procedure :: init => init_solver_settings, print_results
     end type
 
     ! default settings
     type(stability_settings_type), parameter :: default_stability_settings = &
-        stability_settings_type(precond = null(), project = null(), logger = null(), &
-                                initialized = .true., conv_tol = 1e-8_rp, &
+        stability_settings_type(precond = null(), project = null(), &
+                                precond_ctx = null(), project_ctx = null(), &
+                                logger = null(), initialized = .true., &
+                                conv_tol = 1e-8_rp, &
                                 n_random_trial_vectors = 20, n_iter = 100, &
                                 jacobi_davidson_start = 50, seed = 42, verbose = 0, &
                                 diag_solver = "davidson")
     type(solver_settings_type), parameter :: default_solver_settings = &
-        solver_settings_type(precond = null(), project = null(), conv_check = null(), &
+        solver_settings_type(precond = null(), project = null(), &
+                             precond_ctx = null(), project_ctx = null(), &
+                             conv_check = null(), conv_check_ctx = null(), &
                              logger = null(), stability = .false., &
                              line_search = .false., initialized = .true., &
                              conv_tol = 1e-5_rp, start_trust_radius = 0.4_rp, &
@@ -201,10 +303,45 @@ contains
 
     subroutine solver(update_orbs, obj_func, n_param, error, settings)
         !
-        ! this subroutine is the main solver for orbital optimization
+        ! this subroutine is the main solver for orbital optimization, it bundles the
+        ! callback functions of the plain interfaces into a context and defers to the
+        ! context-carrying solver
         !
         procedure(update_orbs_type), intent(in), pointer :: update_orbs
         procedure(obj_func_type), intent(in), pointer :: obj_func
+        integer(ip), intent(in) :: n_param
+        integer(ip), intent(out) :: error
+        type(solver_settings_type), intent(inout) :: settings
+
+        type(plain_callbacks_type), target :: callbacks
+        procedure(update_orbs_ctx_type), pointer :: update_orbs_ctx_funptr
+        procedure(obj_func_ctx_type), pointer :: obj_func_ctx_funptr
+
+        ! bundle the plain callback functions into a context
+        callbacks%update_orbs => update_orbs
+        callbacks%obj_func => obj_func
+
+        ! point to the shims which unpack the context and call the plain callback
+        ! functions
+        update_orbs_ctx_funptr => plain_update_orbs
+        obj_func_ctx_funptr => plain_obj_func
+
+        ! run the context-carrying solver
+        call solver_ctx(update_orbs_ctx_funptr, obj_func_ctx_funptr, callbacks, &
+                        n_param, error, settings)
+
+    end subroutine solver
+
+    subroutine solver_ctx(update_orbs, obj_func, context, n_param, error, settings)
+        !
+        ! this subroutine is the main solver for orbital optimization, its callback
+        ! functions receive an opaque host context as their first argument which
+        ! allows the host program to supply data to its callback functions without
+        ! module-level variables
+        !
+        procedure(update_orbs_ctx_type), intent(in), pointer :: update_orbs
+        procedure(obj_func_ctx_type), intent(in), pointer :: obj_func
+        class(*), intent(inout), target :: context
         integer(ip), intent(in) :: n_param
         integer(ip), intent(out) :: error
         type(solver_settings_type), intent(inout) :: settings
@@ -218,7 +355,7 @@ contains
         integer(ip) :: imacro, imicro, imicro_jacobi_davidson, i
         character(300) :: msg
         integer(ip), parameter :: stability_n_points = 21
-        procedure(hess_x_type), pointer :: hess_x_funptr
+        procedure(hess_x_ctx_type), pointer :: hess_x_funptr
         real(rp), external :: dnrm2, ddot
 
         ! initialize error flag
@@ -236,6 +373,27 @@ contains
             if (error /= 0) return
             call settings%log("Settings were not initialized. All settings are set "// &
                               "to default values", verbosity_warning)
+        end if
+
+        ! ensure the required callback functions are provided
+        if (.not. associated(update_orbs)) then
+            call settings%log(unassociated_update_orbs_error_msg, verbosity_error, &
+                              .true.)
+            error = error_solver + 1
+            return
+        end if
+        if (.not. associated(obj_func)) then
+            call settings%log(unassociated_obj_func_error_msg, verbosity_error, .true.)
+            error = error_solver + 1
+            return
+        end if
+
+        ! refuse an ambiguous convergence check
+        if (associated(settings%conv_check) .and. &
+            associated(settings%conv_check_ctx)) then
+            call settings%log(ambiguous_conv_check_error_msg, verbosity_error, .true.)
+            error = error_solver + 1
+            return
         end if
 
         ! initialize maximum precision convergence
@@ -273,7 +431,8 @@ contains
         do imacro = 1, settings%n_macro
             if (.not. max_precision_reached) then
                 ! calculate cost function, gradient and Hessian diagonal
-                call update_orbs(kappa, func, grad, h_diag, hess_x_funptr, error)
+                call update_orbs(context, kappa, func, grad, h_diag, hess_x_funptr, &
+                                 error)
                 call add_error_origin(error, error_update_orbs, settings)
                 if (error /= 0) return
 
@@ -298,8 +457,8 @@ contains
                         settings%subsystem_solver == "jacobi-davidson") then
                         kappa_norm = dnrm2(n_param, kappa, 1_ip)
                     else
-                        call abs_diag_precond(kappa, h_diag, precond_kappa, settings, &
-                                              error)
+                        call abs_diag_precond(kappa, h_diag, precond_kappa, &
+                                              settings, error, context=context)
                         if (error /= 0) return
                         kappa_norm = sqrt(ddot(n_param, kappa, 1_ip, precond_kappa, &
                                                1_ip))
@@ -331,6 +490,10 @@ contains
                 conv_check_passed = settings%conv_check(error)
                 call add_error_origin(error, error_conv_check, settings)
                 if (error /= 0) return
+            else if (associated(settings%conv_check_ctx)) then
+                conv_check_passed = settings%conv_check_ctx(context, error)
+                call add_error_origin(error, error_conv_check, settings)
+                if (error /= 0) return
             else
                 conv_check_passed = .false.
             end if
@@ -344,12 +507,17 @@ contains
                         settings%stability_settings%precond => settings%precond
                     if (.not. associated(settings%stability_settings%project)) &
                         settings%stability_settings%project => settings%project
+                    if (.not. associated(settings%stability_settings%precond_ctx)) &
+                        settings%stability_settings%precond_ctx => settings%precond_ctx
+                    if (.not. associated(settings%stability_settings%project_ctx)) &
+                        settings%stability_settings%project_ctx => settings%project_ctx
                     if (.not. associated(settings%stability_settings%logger)) &
                         settings%stability_settings%logger => settings%logger
                     settings%stability_settings%verbose = &
                         max(settings%stability_settings%verbose, settings%verbose)
-                    call stability_check(h_diag, hess_x_funptr, stable, error, &
-                                         settings%stability_settings, kappa=kappa)
+                    call stability_check_ctx(h_diag, hess_x_funptr, context, stable, &
+                                             error, settings%stability_settings, &
+                                             kappa=kappa)
                     call add_error_origin(error, error_stability_check, settings)
                     if (error /= 0) return
                     if (.not. stable) then
@@ -358,7 +526,7 @@ contains
                             n_kappa = 10.0_rp**(-(i - 1) / &
                                                 real(stability_n_points - 1, rp) * &
                                                 10.0_rp)
-                            new_func = obj_func(n_kappa*kappa, error)
+                            new_func = obj_func(context, n_kappa*kappa, error)
                             call add_error_origin(error, error_obj_func, settings)
                             if (error /= 0) return
                             if (new_func < func) then
@@ -403,20 +571,23 @@ contains
             if (settings%subsystem_solver == "davidson" .or. &
                 settings%subsystem_solver == "jacobi-davidson") then
                 ! solve trust region subproblem with (Jacobi-)Davidson
-                call level_shifted_davidson(func, grad, grad_norm, h_diag, n_param, &
-                                            obj_func, hess_x_funptr, settings, &
-                                            trust_radius, solution, mu, imicro, &
-                                            imicro_jacobi_davidson, &
-                                            jacobi_davidson_started, &
-                                            max_precision_reached, error)
+                call level_shifted_davidson_ctx(func, grad, grad_norm, h_diag, &
+                                                n_param, obj_func, hess_x_funptr, &
+                                                context, settings, trust_radius, &
+                                                solution, mu, imicro, &
+                                                imicro_jacobi_davidson, &
+                                                jacobi_davidson_started, &
+                                                max_precision_reached, error)
                 call add_error_origin(error, error_solver, settings)
                 if (error /= 0) return
             else
                 ! solve trust region subproblem with truncated conjugate gradient
-                call truncated_conjugate_gradient(func, grad, h_diag, n_param, &
-                                                  obj_func, hess_x_funptr, &
-                                                  settings, trust_radius, solution, &
-                                                  imicro, max_precision_reached, error)
+                call truncated_conjugate_gradient_ctx(func, grad, h_diag, n_param, &
+                                                      obj_func, hess_x_funptr, &
+                                                      context, settings, &
+                                                      trust_radius, solution, &
+                                                      imicro, max_precision_reached, &
+                                                      error)
                 call add_error_origin(error, error_solver, settings)
                 if (error /= 0) return
             end if
@@ -425,7 +596,8 @@ contains
             if (max_precision_reached) then
                 n_kappa = 0.0_rp
             else if (settings%line_search) then
-                n_kappa = bracket(obj_func, solution, 0.0_rp, 1.0_rp, settings, error)
+                n_kappa = bracket_ctx(obj_func, context, solution, 0.0_rp, 1.0_rp, &
+                                      settings, error)
                 call add_error_origin(error, error_solver, settings)
                 if (error /= 0) return
             else
@@ -467,14 +639,47 @@ contains
         flush (stdout)
         flush (stderr)
 
-    end subroutine solver
+    end subroutine solver_ctx
 
     subroutine stability_check(h_diag, hess_x_funptr, stable, error, settings, kappa)
         !
-        ! this subroutine performs a stability check
+        ! this subroutine performs a stability check, it bundles the callback function
+        ! of the plain interface into a context and defers to the context-carrying
+        ! stability check
         !
         real(rp), intent(in) :: h_diag(:)
         procedure(hess_x_type), intent(in), pointer :: hess_x_funptr
+        logical, intent(out) :: stable
+        integer(ip), intent(out) :: error
+        type(stability_settings_type), intent(inout) :: settings
+        real(rp), intent(out), optional :: kappa(:)
+
+        type(plain_callbacks_type), target :: callbacks
+        procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
+
+        ! bundle the plain callback function into a context
+        callbacks%hess_x => hess_x_funptr
+
+        ! point to the shim which unpacks the context and calls the plain callback
+        ! function
+        hess_x_ctx_funptr => plain_hess_x
+
+        ! run the context-carrying stability check
+        call stability_check_ctx(h_diag, hess_x_ctx_funptr, callbacks, stable, error, &
+                                 settings, kappa=kappa)
+
+    end subroutine stability_check
+
+    subroutine stability_check_ctx(h_diag, hess_x_funptr, context, stable, error, &
+                                   settings, kappa)
+        !
+        ! this subroutine performs a stability check, its callback function receives
+        ! an opaque host context as its first argument which allows the host program
+        ! to supply data to its callback function without module-level variables
+        !
+        real(rp), intent(in) :: h_diag(:)
+        procedure(hess_x_ctx_type), intent(in), pointer :: hess_x_funptr
+        class(*), intent(inout), target :: context
         logical, intent(out) :: stable
         integer(ip), intent(out) :: error
         type(stability_settings_type), intent(inout) :: settings
@@ -507,6 +712,13 @@ contains
                               "to default values", verbosity_warning)
         end if
 
+        ! ensure the required callback function is provided
+        if (.not. associated(hess_x_funptr)) then
+            call settings%log(unassociated_hess_x_error_msg, verbosity_error, .true.)
+            error = error_stability_check + 1
+            return
+        end if
+
         ! initialize random number generator
         call init_rng(settings%seed)
 
@@ -522,7 +734,8 @@ contains
         allocate(red_space_basis(n_param, 1 + settings%n_random_trial_vectors))
         red_space_basis(:, 1) = 0.0_rp
         red_space_basis(minloc(h_diag), 1) = 1.0_rp
-        call generate_random_trial_vectors(red_space_basis, settings, error)
+        call generate_random_trial_vectors(red_space_basis, settings, error, &
+                                           context=context)
         call add_error_origin(error, error_stability_check, settings)
         if (error /= 0) return
 
@@ -532,7 +745,7 @@ contains
         ! calculate linear transformations of basis vectors
         allocate(h_basis(n_param, n_trial))
         do i = 1, n_trial
-            call hess_x_funptr(red_space_basis(:, i), h_basis(:, i), error)
+            call hess_x_funptr(context, red_space_basis(:, i), h_basis(:, i), error)
             call add_error_origin(error, error_hess_x, settings)
             if (error /= 0) return
         end do
@@ -589,7 +802,7 @@ contains
                 settings%jacobi_davidson_start) then
                 ! precondition residual
                 call level_shifted_diag_precond(residual, 0.0_rp, h_diag, basis_vec, &
-                                                settings, error)
+                                                settings, error, context=context)
                 if (error /= 0) return
 
                 ! orthonormalize to current orbital space to get new basis vector
@@ -605,7 +818,7 @@ contains
                 if (error /= 0) return
 
                 ! add linear transformation of new basis vector
-                call hess_x_funptr(basis_vec, h_basis_vec, error)
+                call hess_x_funptr(context, basis_vec, h_basis_vec, error)
                 call add_error_origin(error, error_hess_x, settings)
                 if (error /= 0) return
 
@@ -615,8 +828,8 @@ contains
             else
                 ! solve Jacobi-Davidson correction equations
                 minres_tol = 3.0_rp ** (-(iter - settings%jacobi_davidson_start - 1))
-                call minres(-residual, hess_x_funptr, solution, eigval, minres_tol, &
-                            basis_vec, h_basis_vec, settings, error)
+                call minres_ctx(-residual, hess_x_funptr, context, solution, eigval, &
+                                minres_tol, basis_vec, h_basis_vec, settings, error)
                 call add_error_origin(error, error_stability_check, settings)
                 if (error /= 0) return
 
@@ -639,7 +852,7 @@ contains
                              1_ip) &
                         - ddot(n_param, basis_vec, 1_ip, h_basis(:, n_trial), 1_ip)) > &
                     hess_symm_thres) then
-                    call hess_x_funptr(basis_vec, h_basis_vec, error)
+                    call hess_x_funptr(context, basis_vec, h_basis_vec, error)
                     call add_error_origin(error, error_hess_x, settings)
                     if (error /= 0) return
                 end if
@@ -695,7 +908,91 @@ contains
         flush (stdout)
         flush (stderr)
 
-    end subroutine stability_check
+    end subroutine stability_check_ctx
+
+    subroutine plain_update_orbs(context, kappa, func, grad, h_diag, hess_x_funptr, &
+                                 error)
+        !
+        ! this subroutine adapts a callback function of the plain update_orbs
+        ! interface onto the context-carrying interface, the context is the bundle of
+        ! plain callback functions and also receives the returned Hessian linear
+        ! transformation callback function
+        !
+        class(*), intent(inout), target :: context
+        real(rp), intent(in), target :: kappa(:)
+        real(rp), intent(out) :: func
+        real(rp), intent(out), target :: grad(:), h_diag(:)
+        procedure(hess_x_ctx_type), intent(out), pointer :: hess_x_funptr
+        integer(ip), intent(out) :: error
+
+        procedure(hess_x_type), pointer :: plain_hess_x_funptr
+
+        ! initialize the Hessian linear transformation of the plain interface
+        plain_hess_x_funptr => null()
+
+        ! recover the bundle of plain callback functions from the context
+        select type (callbacks => context)
+        type is (plain_callbacks_type)
+            ! call the plain callback function
+            call callbacks%update_orbs(kappa, func, grad, h_diag, &
+                                       plain_hess_x_funptr, error)
+
+            ! store the returned Hessian linear transformation in the context and
+            ! return the shim which calls it
+            callbacks%hess_x => plain_hess_x_funptr
+            hess_x_funptr => plain_hess_x
+        class default
+            error = 1
+        end select
+
+    end subroutine plain_update_orbs
+
+    function plain_obj_func(context, kappa, error) result(func)
+        !
+        ! this function adapts a callback function of the plain obj_func interface
+        ! onto the context-carrying interface, the context is the bundle of plain
+        ! callback functions
+        !
+        class(*), intent(inout), target :: context
+        real(rp), intent(in), target :: kappa(:)
+        integer(ip), intent(out) :: error
+        real(rp) :: func
+
+        ! initialize objective function
+        func = 0.0_rp
+
+        ! recover the bundle of plain callback functions from the context and call the
+        ! plain callback function
+        select type (callbacks => context)
+        type is (plain_callbacks_type)
+            func = callbacks%obj_func(kappa, error)
+        class default
+            error = 1
+        end select
+
+    end function plain_obj_func
+
+    subroutine plain_hess_x(context, x, hess_x, error)
+        !
+        ! this subroutine adapts a callback function of the plain hess_x interface
+        ! onto the context-carrying interface, the context is the bundle of plain
+        ! callback functions
+        !
+        class(*), intent(inout), target :: context
+        real(rp), intent(in), target :: x(:)
+        real(rp), intent(out), target :: hess_x(:)
+        integer(ip), intent(out) :: error
+
+        ! recover the bundle of plain callback functions from the context and call the
+        ! plain callback function
+        select type (callbacks => context)
+        type is (plain_callbacks_type)
+            call callbacks%hess_x(x, hess_x, error)
+        class default
+            error = 1
+        end select
+
+    end subroutine plain_hess_x
 
     subroutine newton_step(aug_hess, grad_norm, red_space_basis, solution, &
                            red_space_solution, settings, error)
@@ -994,9 +1291,40 @@ contains
 
     function bracket(obj_func, kappa, lower, upper, settings, error) result(n_kappa)
         !
-        ! this function brackets a minimum (algorithm from numerical recipes)
+        ! this function brackets a minimum, it bundles the callback function of the
+        ! plain interface into a context and defers to the context-carrying bracketing
         !
         procedure(obj_func_type), intent(in), pointer :: obj_func
+        real(rp), intent(in) :: kappa(:), lower, upper
+        class(settings_type), intent(in) :: settings
+        integer(ip), intent(out) :: error
+
+        real(rp) :: n_kappa
+
+        type(plain_callbacks_type), target :: callbacks
+        procedure(obj_func_ctx_type), pointer :: obj_func_ctx_funptr
+
+        ! bundle the plain callback function into a context
+        callbacks%obj_func => obj_func
+
+        ! point to the shim which unpacks the context and calls the plain callback
+        ! function
+        obj_func_ctx_funptr => plain_obj_func
+
+        ! run the context-carrying bracketing
+        n_kappa = bracket_ctx(obj_func_ctx_funptr, callbacks, kappa, lower, upper, &
+                              settings, error)
+
+    end function bracket
+
+    function bracket_ctx(obj_func, context, kappa, lower, upper, settings, error) &
+        result(n_kappa)
+        !
+        ! this function brackets a minimum (algorithm from numerical recipes), its
+        ! callback function receives an opaque host context as its first argument
+        !
+        procedure(obj_func_ctx_type), intent(in), pointer :: obj_func
+        class(*), intent(inout), target :: context
         real(rp), intent(in) :: kappa(:), lower, upper
         class(settings_type), intent(in) :: settings
         integer(ip), intent(out) :: error
@@ -1014,10 +1342,10 @@ contains
         n_kappa = 0.0_rp
 
         ! evaluate function at upper and lower bounds
-        f_lower = obj_func(lower*kappa, error)
+        f_lower = obj_func(context, lower*kappa, error)
         call add_error_origin(error, error_obj_func, settings)
         if (error /= 0) return
-        f_upper = obj_func(upper*kappa, error)
+        f_upper = obj_func(context, upper*kappa, error)
         call add_error_origin(error, error_obj_func, settings)
         if (error /= 0) return
 
@@ -1036,7 +1364,7 @@ contains
 
         ! default step
         n_c = n_b + golden_ratio*(n_b - n_a)
-        f_c = obj_func(n_c*kappa, error)
+        f_c = obj_func(context, n_c*kappa, error)
         call add_error_origin(error, error_obj_func, settings)
         if (error /= 0) return
 
@@ -1056,7 +1384,7 @@ contains
             ! check if u is between n_b and n_c
             if ((n_u - n_c)*(n_b - n_u) > 0.0) then
                 ! evaluate function at n_u
-                f_u = obj_func(n_u*kappa, error)
+                f_u = obj_func(context, n_u*kappa, error)
                 call add_error_origin(error, error_obj_func, settings)
                 if (error /= 0) return
 
@@ -1076,19 +1404,19 @@ contains
 
                 ! parabolic fit did not help, default step
                 n_u = n_c + golden_ratio*(n_c - n_b)
-                f_u = obj_func(n_u*kappa, error)
+                f_u = obj_func(context, n_u*kappa, error)
                 call add_error_origin(error, error_obj_func, settings)
                 if (error /= 0) return
             ! limit parabolic fit to its maximum allowed value
             else if ((n_u - n_u_lim)*(n_u_lim - n_c) >= 0.0_rp) then
                 n_u = n_u_lim
-                f_u = obj_func(n_u*kappa, error)
+                f_u = obj_func(context, n_u*kappa, error)
                 call add_error_origin(error, error_obj_func, settings)
                 if (error /= 0) return
             ! parabolic fit is between n_c and its allowed limit
             else if ((n_u - n_u_lim)*(n_c - n_u) > 0.0_rp) then
                 ! evaluate function at n_u
-                f_u = obj_func(n_u*kappa, error)
+                f_u = obj_func(context, n_u*kappa, error)
                 call add_error_origin(error, error_obj_func, settings)
                 if (error /= 0) return
 
@@ -1098,14 +1426,14 @@ contains
                     n_u = n_c + golden_ratio*(n_c - n_b)
                     f_b = f_c
                     f_c = f_u
-                    f_u = obj_func(n_u*kappa, error)
+                    f_u = obj_func(context, n_u*kappa, error)
                     call add_error_origin(error, error_obj_func, settings)
                     if (error /= 0) return
                 end if
             ! reject parabolic fit and use default step
             else
                 n_u = n_c + golden_ratio*(n_c - n_b)
-                f_u = obj_func(n_u*kappa, error)
+                f_u = obj_func(context, n_u*kappa, error)
                 call add_error_origin(error, error_obj_func, settings)
                 if (error /= 0) return
             end if
@@ -1139,7 +1467,7 @@ contains
         ! set new multiplier
         n_kappa = n_b
 
-    end function bracket
+    end function bracket_ctx
 
     subroutine extend_symm_matrix(matrix, vector)
         !
@@ -1288,14 +1616,15 @@ contains
 
     end subroutine init_rng
 
-    function generate_trial_vectors(grad, grad_norm, h_diag, settings, error) &
-        result(red_space_basis)
+    function generate_trial_vectors(grad, grad_norm, h_diag, settings, error, &
+                                    context) result(red_space_basis)
         !
         ! this function generates trial vectors
         !
         real(rp), intent(in) :: grad(:), grad_norm, h_diag(:)
         type(solver_settings_type), intent(in) :: settings
         integer(ip), intent(out) :: error
+        class(*), intent(inout), optional, target :: context
 
         real(rp), allocatable :: red_space_basis(:, :)
 
@@ -1315,11 +1644,8 @@ contains
             allocate(neg_curv_vec(size(grad)))
             neg_curv_vec = 0.0_rp
             neg_curv_vec(min_idx) = 1.0_rp
-            if (associated(settings%project)) then
-                call settings%project(neg_curv_vec, error)
-                call add_error_origin(error, error_project, settings)
-                if (error /= 0) return
-            end if
+            call apply_project(settings, neg_curv_vec, error, context=context)
+            if (error /= 0) return
             call gram_schmidt(neg_curv_vec, &
                               reshape(grad / grad_norm, [size(grad), 1]), &
                               settings, error)
@@ -1340,17 +1666,20 @@ contains
         red_space_basis(:, 1) = grad / grad_norm
         if (n_vectors == 2) red_space_basis(:, 2) = neg_curv_vec
 
-        call generate_random_trial_vectors(red_space_basis, settings, error)
+        call generate_random_trial_vectors(red_space_basis, settings, error, &
+                                           context=context)
 
     end function generate_trial_vectors
 
-    subroutine generate_random_trial_vectors(red_space_basis, settings, error)
+    subroutine generate_random_trial_vectors(red_space_basis, settings, error, &
+                                             context)
         !
         ! this subroutine generates random trial vectors
         !
         real(rp), intent(inout) :: red_space_basis(:, :)
         class(settings_type), intent(in) :: settings
         integer(ip), intent(out) :: error
+        class(*), intent(inout), optional, target :: context
 
         integer(ip) :: n_param, n_trial, i, n_attempts
         integer(ip), parameter :: max_rnd_trial_attempts = 100
@@ -1386,11 +1715,9 @@ contains
                     call random_number(red_space_basis(:, i))
                     red_space_basis(:, i) = 2*red_space_basis(:, i) - 1
                 end do
-                if (associated(settings%project)) then
-                    call settings%project(red_space_basis(:, i), error)
-                    call add_error_origin(error, error_project, settings)
-                    if (error /= 0) return
-                end if
+                call apply_project(settings, red_space_basis(:, i), error, &
+                                   context=context)
+                if (error /= 0) return
                 call gram_schmidt(red_space_basis(:, i), red_space_basis(:, :i - 1), &
                                   settings, error, silent_on_error=.true.)
             end do
@@ -1540,8 +1867,94 @@ contains
 
     end subroutine init_stability_settings
 
+    subroutine apply_precond(settings, vector, mu, precond_vector, applied, error, &
+                             context)
+        !
+        ! this subroutine applies the user-defined preconditioner, either the one of
+        ! the plain interface or the one of the context-carrying interface, and reports
+        ! whether a user-defined preconditioner was provided at all
+        !
+        class(settings_type), intent(in) :: settings
+        real(rp), intent(in) :: vector(:), mu
+        real(rp), intent(out) :: precond_vector(:)
+        logical, intent(out) :: applied
+        integer(ip), intent(out) :: error
+        class(*), intent(inout), optional, target :: context
+
+        ! initialize error flag
+        error = 0
+
+        ! assume no user-defined preconditioner is provided
+        applied = .false.
+
+        ! refuse ambiguity between the two preconditioner interfaces
+        if (associated(settings%precond) .and. associated(settings%precond_ctx)) then
+            call settings%log(ambiguous_precond_error_msg, verbosity_error, .true.)
+            error = 1
+            return
+        end if
+
+        ! a context-carrying preconditioner can only be called with a context
+        if (associated(settings%precond_ctx) .and. .not. present(context)) then
+            call settings%log(missing_context_error_msg, verbosity_error, .true.)
+            error = 1
+            return
+        end if
+
+        ! call the preconditioner of the plain interface
+        if (associated(settings%precond)) then
+            call settings%precond(vector, mu, precond_vector, error)
+            applied = .true.
+        ! call the preconditioner of the context-carrying interface
+        else if (associated(settings%precond_ctx)) then
+            call settings%precond_ctx(context, vector, mu, precond_vector, error)
+            applied = .true.
+        end if
+        call add_error_origin(error, error_precond, settings)
+
+    end subroutine apply_precond
+
+    subroutine apply_project(settings, vector, error, context)
+        !
+        ! this subroutine applies the user-defined projection, either the one of the
+        ! plain interface or the one of the context-carrying interface, and does
+        ! nothing if no projection is provided
+        !
+        class(settings_type), intent(in) :: settings
+        real(rp), intent(inout) :: vector(:)
+        integer(ip), intent(out) :: error
+        class(*), intent(inout), optional, target :: context
+
+        ! initialize error flag
+        error = 0
+
+        ! refuse ambiguity between the two projection interfaces
+        if (associated(settings%project) .and. associated(settings%project_ctx)) then
+            call settings%log(ambiguous_project_error_msg, verbosity_error, .true.)
+            error = 1
+            return
+        end if
+
+        ! a context-carrying projection can only be called with a context
+        if (associated(settings%project_ctx) .and. .not. present(context)) then
+            call settings%log(missing_context_error_msg, verbosity_error, .true.)
+            error = 1
+            return
+        end if
+
+        ! call the projection of the plain interface
+        if (associated(settings%project)) then
+            call settings%project(vector, error)
+        ! call the projection of the context-carrying interface
+        else if (associated(settings%project_ctx)) then
+            call settings%project_ctx(context, vector, error)
+        end if
+        call add_error_origin(error, error_project, settings)
+
+    end subroutine apply_project
+
     subroutine level_shifted_diag_precond(vector, mu, h_diag, precond_vector, &
-                                          settings, error)
+                                          settings, error, context)
         !
         ! this function defines the default level-shifted diagonal preconditioner
         !
@@ -1549,17 +1962,20 @@ contains
         real(rp), intent(out) :: precond_vector(:)
         class(settings_type), intent(in) :: settings
         integer(ip), intent(out) :: error
+        class(*), intent(inout), optional, target :: context
+
+        logical :: precond_applied
 
         ! initialize error flag
         error = 0
 
         ! check for user-defined preconditioner
-        if (associated(settings%precond)) then
-            call settings%precond(vector, mu, precond_vector, error)
-            call add_error_origin(error, error_precond, settings)
-            if (error /= 0) return
+        call apply_precond(settings, vector, mu, precond_vector, precond_applied, &
+                           error, context=context)
+        if (error /= 0) return
+
         ! construct level-shifted preconditioner
-        else
+        if (.not. precond_applied) then
             precond_vector = h_diag - mu
             where (abs(precond_vector) < precond_floor)
                 precond_vector = precond_floor
@@ -1567,16 +1983,14 @@ contains
             precond_vector = vector / precond_vector
 
             ! ensure basis vector stays in subspace
-            if (associated(settings%project)) then
-                call settings%project(precond_vector, error)
-                call add_error_origin(error, error_project, settings)
-                if (error /= 0) return
-            end if
+            call apply_project(settings, precond_vector, error, context=context)
+            if (error /= 0) return
         end if
         
     end subroutine level_shifted_diag_precond
 
-    subroutine abs_diag_precond(vector, h_diag, precond_vector, settings, error)
+    subroutine abs_diag_precond(vector, h_diag, precond_vector, settings, error, &
+                                context)
         !
         ! this function defines the default absolute diagonal preconditioner
         !
@@ -1584,26 +1998,26 @@ contains
         real(rp), intent(out) :: precond_vector(:)
         class(settings_type), intent(in) :: settings
         integer(ip), intent(out) :: error
+        class(*), intent(inout), optional, target :: context
+
+        logical :: precond_applied
 
         ! initialize error flag
         error = 0
 
         ! check for user-defined preconditioner
-        if (associated(settings%precond)) then
-            call settings%precond(vector, 0.0_rp, precond_vector, error)
-            call add_error_origin(error, error_precond, settings)
-            if (error /= 0) return
+        call apply_precond(settings, vector, 0.0_rp, precond_vector, precond_applied, &
+                           error, context=context)
+        if (error /= 0) return
+
         ! construct positive-definite preconditioner
-        else
+        if (.not. precond_applied) then
             precond_vector = max(abs(h_diag), precond_floor)
             precond_vector = vector / precond_vector
 
             ! ensure basis vector stays in subspace
-            if (associated(settings%project)) then
-                call settings%project(precond_vector, error)
-                call add_error_origin(error, error_project, settings)
-                if (error /= 0) return
-            end if
+            call apply_project(settings, precond_vector, error, context=context)
+            if (error /= 0) return
         end if
         
     end subroutine abs_diag_precond
@@ -1626,10 +2040,43 @@ contains
     subroutine jacobi_davidson_correction(hess_x_funptr, vector, solution, eigval, &
                                           corr_vector, hess_vector, settings, error)
         !
-        ! this subroutine performs the Jacobi-Davidson correction but also returns the 
-        ! Hessian linear transformation since this can be reused
+        ! this subroutine performs the Jacobi-Davidson correction, it bundles the
+        ! callback function of the plain interface into a context and defers to the
+        ! context-carrying Jacobi-Davidson correction
         !
         procedure(hess_x_type), intent(in), pointer :: hess_x_funptr
+        real(rp), intent(in) :: vector(:), solution(:), eigval
+        real(rp), intent(out) :: corr_vector(:), hess_vector(:)
+        class(settings_type), intent(in) :: settings
+        integer(ip), intent(out) :: error
+
+        type(plain_callbacks_type), target :: callbacks
+        procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
+
+        ! bundle the plain callback function into a context
+        callbacks%hess_x => hess_x_funptr
+
+        ! point to the shim which unpacks the context and calls the plain callback
+        ! function
+        hess_x_ctx_funptr => plain_hess_x
+
+        ! run the context-carrying Jacobi-Davidson correction
+        call jacobi_davidson_correction_ctx(hess_x_ctx_funptr, callbacks, vector, &
+                                            solution, eigval, corr_vector, &
+                                            hess_vector, settings, error)
+
+    end subroutine jacobi_davidson_correction
+
+    subroutine jacobi_davidson_correction_ctx(hess_x_funptr, context, vector, &
+                                              solution, eigval, corr_vector, &
+                                              hess_vector, settings, error)
+        !
+        ! this subroutine performs the Jacobi-Davidson correction but also returns the 
+        ! Hessian linear transformation since this can be reused, its callback function
+        ! receives an opaque host context as its first argument
+        !
+        procedure(hess_x_ctx_type), intent(in), pointer :: hess_x_funptr
+        class(*), intent(inout), target :: context
         real(rp), intent(in) :: vector(:), solution(:), eigval
         real(rp), intent(out) :: corr_vector(:), hess_vector(:)
         class(settings_type), intent(in) :: settings
@@ -1642,7 +2089,7 @@ contains
         corr_vector = orthogonal_projection(vector, solution)
 
         ! get Hessian linear transformation of projected vector
-        call hess_x_funptr(corr_vector, hess_vector, error)
+        call hess_x_funptr(context, corr_vector, hess_vector, error)
         call add_error_origin(error, error_hess_x, settings)
         if (error /= 0) return
 
@@ -1650,17 +2097,50 @@ contains
         corr_vector = orthogonal_projection(hess_vector - eigval * corr_vector, &
                                             solution)
     
-    end subroutine jacobi_davidson_correction
+    end subroutine jacobi_davidson_correction_ctx
 
     subroutine minres(rhs, hess_x_funptr, solution, eigval, r_tol, vec, hvec, &
                       settings, error, guess, max_iter)
         !
-        ! this function uses the minimum residual method to iteratively solve the 
-        ! linear system for the Jacobi-Davidson correction equation, modified from 
-        ! SciPy implementation
+        ! this subroutine solves the linear system for the Jacobi-Davidson correction
+        ! equation, it bundles the callback function of the plain interface into a
+        ! context and defers to the context-carrying minimum residual method
         !
         real(rp), intent(in) :: rhs(:), r_tol, solution(:), eigval
         procedure(hess_x_type), intent(in), pointer :: hess_x_funptr
+        real(rp), intent(out) :: vec(:), hvec(:)
+        class(settings_type), intent(in) :: settings
+        integer(ip), intent(out) :: error
+        real(rp), intent(in), optional :: guess(:)
+        integer(ip), intent(in), optional :: max_iter
+
+        type(plain_callbacks_type), target :: callbacks
+        procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
+
+        ! bundle the plain callback function into a context
+        callbacks%hess_x => hess_x_funptr
+
+        ! point to the shim which unpacks the context and calls the plain callback
+        ! function
+        hess_x_ctx_funptr => plain_hess_x
+
+        ! run the context-carrying minimum residual method
+        call minres_ctx(rhs, hess_x_ctx_funptr, callbacks, solution, eigval, r_tol, &
+                        vec, hvec, settings, error, guess=guess, max_iter=max_iter)
+
+    end subroutine minres
+
+    subroutine minres_ctx(rhs, hess_x_funptr, context, solution, eigval, r_tol, vec, &
+                          hvec, settings, error, guess, max_iter)
+        !
+        ! this function uses the minimum residual method to iteratively solve the 
+        ! linear system for the Jacobi-Davidson correction equation, modified from 
+        ! SciPy implementation, its callback function receives an opaque host context
+        ! as its first argument
+        !
+        real(rp), intent(in) :: rhs(:), r_tol, solution(:), eigval
+        procedure(hess_x_ctx_type), intent(in), pointer :: hess_x_funptr
+        class(*), intent(inout), target :: context
         real(rp), intent(out) :: vec(:), hvec(:)
         class(settings_type), intent(in) :: settings
         integer(ip), intent(out) :: error
@@ -1693,8 +2173,9 @@ contains
         ! initial guess
         if (present(guess)) then
             vec = guess
-            call jacobi_davidson_correction(hess_x_funptr, vec, solution, eigval, &
-                                            matvec, hvec, settings, error)
+            call jacobi_davidson_correction_ctx(hess_x_funptr, context, vec, &
+                                                solution, eigval, matvec, hvec, &
+                                                settings, error)
             if (error /= 0) return
             tot_hess_x = tot_hess_x + 1
         else
@@ -1749,8 +2230,8 @@ contains
             v = y / beta
 
             ! apply Jacobi-Davidson projector to trial vector
-            call jacobi_davidson_correction(hess_x_funptr, v, solution, eigval, y, hv, &
-                                            settings, error)
+            call jacobi_davidson_correction_ctx(hess_x_funptr, context, v, solution, &
+                                                eigval, y, hv, settings, error)
             if (error /= 0) return
             tot_hess_x = tot_hess_x + 1
 
@@ -1859,7 +2340,7 @@ contains
 
         deallocate(matvec, r1, r2, y, w, hw, w1, hw1, w2, hw2, v, hv)
 
-    end subroutine minres
+    end subroutine minres_ctx
 
     subroutine print_results(self, iteration, func, grad_rms, level_shift, n_micro, &
                              imicro_jacobi_davidson, trust_radius, kappa_norm)
@@ -2013,13 +2494,59 @@ contains
                                       jacobi_davidson_started, max_precision_reached, &
                                       error)
         !
-        ! this subroutine performs level-shifted (Jacobi-)Davidson to solve the trust 
-        ! region subproblem
+        ! this subroutine solves the trust region subproblem, it bundles the callback
+        ! functions of the plain interfaces into a context and defers to the
+        ! context-carrying level-shifted (Jacobi-)Davidson
         !
         real(rp), intent(in) :: func, grad(:), grad_norm, h_diag(:)
         integer(ip), intent(in) :: n_param
         procedure(obj_func_type), pointer, intent(in) :: obj_func
         procedure(hess_x_type), pointer, intent(in) :: hess_x_funptr
+        type(solver_settings_type), intent(in) :: settings
+        real(rp), intent(inout) :: trust_radius
+        real(rp), intent(out) :: solution(:), mu
+        integer(ip), intent(out) :: imicro, imicro_jacobi_davidson, error
+        logical, intent(out) :: jacobi_davidson_started, max_precision_reached
+
+        type(plain_callbacks_type), target :: callbacks
+        procedure(obj_func_ctx_type), pointer :: obj_func_ctx_funptr
+        procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
+
+        ! bundle the plain callback functions into a context
+        callbacks%obj_func => obj_func
+        callbacks%hess_x => hess_x_funptr
+
+        ! point to the shims which unpack the context and call the plain callback
+        ! functions
+        obj_func_ctx_funptr => plain_obj_func
+        hess_x_ctx_funptr => plain_hess_x
+
+        ! run the context-carrying level-shifted (Jacobi-)Davidson
+        call level_shifted_davidson_ctx(func, grad, grad_norm, h_diag, n_param, &
+                                        obj_func_ctx_funptr, hess_x_ctx_funptr, &
+                                        callbacks, settings, trust_radius, solution, &
+                                        mu, imicro, imicro_jacobi_davidson, &
+                                        jacobi_davidson_started, &
+                                        max_precision_reached, error)
+
+    end subroutine level_shifted_davidson
+
+    subroutine level_shifted_davidson_ctx(func, grad, grad_norm, h_diag, n_param, &
+                                          obj_func, hess_x_funptr, context, settings, &
+                                          trust_radius, solution, mu, imicro, &
+                                          imicro_jacobi_davidson, &
+                                          jacobi_davidson_started, &
+                                          max_precision_reached, error)
+        !
+        ! this subroutine performs level-shifted (Jacobi-)Davidson to solve the trust 
+        ! region subproblem, its callback functions receive an opaque host context as
+        ! their first argument
+        !
+        real(rp), intent(in) :: func, grad(:), grad_norm, h_diag(:)
+        integer(ip), intent(in) :: n_param
+        procedure(obj_func_ctx_type), pointer, intent(in) :: obj_func
+        procedure(hess_x_ctx_type), pointer, intent(in) :: hess_x_funptr
+        class(*), intent(inout), target :: context
         type(solver_settings_type), intent(in) :: settings
         real(rp), intent(inout) :: trust_radius
         real(rp), intent(out) :: solution(:), mu
@@ -2048,7 +2575,7 @@ contains
 
         ! generate trial vectors
         red_space_basis = generate_trial_vectors(grad, grad_norm, h_diag, settings, &
-                                                 error)
+                                                 error, context=context)
         if (error /= 0) return
 
         ! number of trial vectors
@@ -2060,7 +2587,7 @@ contains
         ! calculate linear transformations of basis vectors
         allocate(h_basis(n_param, n_trial))
         do i = 1, n_trial
-            call hess_x_funptr(red_space_basis(:, i), h_basis(:, i), error)
+            call hess_x_funptr(context, red_space_basis(:, i), h_basis(:, i), error)
             call add_error_origin(error, error_hess_x, settings)
             if (error /= 0) return
         end do
@@ -2177,8 +2704,9 @@ contains
 
                 if (.not. jacobi_davidson_started) then
                     ! precondition residual
-                    call level_shifted_diag_precond(residual, mu, h_diag, basis_vec, &
-                                                    settings, error)
+                    call level_shifted_diag_precond(residual, mu, h_diag, &
+                                                    basis_vec, settings, error, &
+                                                    context=context)
                     if (error /= 0) return
 
                     ! orthonormalize to current orbital space to get new basis vector
@@ -2193,7 +2721,7 @@ contains
                     end if
 
                     ! add linear transformation of new basis vector
-                    call hess_x_funptr(basis_vec, h_basis_vec, error)
+                    call hess_x_funptr(context, basis_vec, h_basis_vec, error)
                     call add_error_origin(error, error_hess_x, settings)
                     if (error /= 0) return
 
@@ -2203,8 +2731,9 @@ contains
                 else
                     ! solve Jacobi-Davidson correction equations
                     minres_tol = 3.0_rp ** (-(imicro - imicro_jacobi_davidson))
-                    call minres(-residual, hess_x_funptr, solution_normalized, mu, &
-                                minres_tol, basis_vec, h_basis_vec, settings, error)
+                    call minres_ctx(-residual, hess_x_funptr, context, &
+                                    solution_normalized, mu, minres_tol, basis_vec, &
+                                    h_basis_vec, settings, error)
                     if (error /= 0) return
 
                     ! orthonormalize to current orbital space to get new basis vector
@@ -2226,7 +2755,7 @@ contains
                                  h_basis_vec, 1_ip) - &
                             ddot(n_param, basis_vec, 1_ip, h_basis(:, n_trial), 1_ip)) &
                         > hess_symm_thres) then
-                        call hess_x_funptr(basis_vec, h_basis_vec, error)
+                        call hess_x_funptr(context, basis_vec, h_basis_vec, error)
                         call add_error_origin(error, error_hess_x, settings)
                         if (error /= 0) return
                     end if
@@ -2256,7 +2785,7 @@ contains
             end do
 
             ! evaluate function at predicted point
-            new_func = obj_func(solution, error)
+            new_func = obj_func(context, solution, error)
             call add_error_origin(error, error_obj_func, settings)
             if (error /= 0) return
 
@@ -2276,20 +2805,63 @@ contains
                    residual, basis_vec, h_basis_vec, solution_normalized, &
                    last_solution_normalized)
 
-    end subroutine level_shifted_davidson
+    end subroutine level_shifted_davidson_ctx
 
     subroutine truncated_conjugate_gradient(func, grad, h_diag, n_param, obj_func, &
                                             hess_x_funptr, settings, trust_radius, &
                                             solution, imicro, max_precision_reached, &
                                             error)
         !
-        ! this subroutine performs truncated conjugate gradient to solve the trust 
-        ! region subproblem
+        ! this subroutine solves the trust region subproblem, it bundles the callback
+        ! functions of the plain interfaces into a context and defers to the
+        ! context-carrying truncated conjugate gradient
         !
         real(rp), intent(in) :: func, grad(:), h_diag(:)
         integer(ip), intent(in) :: n_param
         procedure(obj_func_type), pointer, intent(in) :: obj_func
         procedure(hess_x_type), pointer, intent(in) :: hess_x_funptr
+        type(solver_settings_type), intent(in) :: settings
+        real(rp), intent(inout) :: trust_radius
+        real(rp), intent(out) :: solution(:)
+        integer(ip), intent(out) :: imicro, error
+        logical, intent(out) :: max_precision_reached
+
+        type(plain_callbacks_type), target :: callbacks
+        procedure(obj_func_ctx_type), pointer :: obj_func_ctx_funptr
+        procedure(hess_x_ctx_type), pointer :: hess_x_ctx_funptr
+
+        ! bundle the plain callback functions into a context
+        callbacks%obj_func => obj_func
+        callbacks%hess_x => hess_x_funptr
+
+        ! point to the shims which unpack the context and call the plain callback
+        ! functions
+        obj_func_ctx_funptr => plain_obj_func
+        hess_x_ctx_funptr => plain_hess_x
+
+        ! run the context-carrying truncated conjugate gradient
+        call truncated_conjugate_gradient_ctx(func, grad, h_diag, n_param, &
+                                              obj_func_ctx_funptr, &
+                                              hess_x_ctx_funptr, callbacks, settings, &
+                                              trust_radius, solution, imicro, &
+                                              max_precision_reached, error)
+
+    end subroutine truncated_conjugate_gradient
+
+    subroutine truncated_conjugate_gradient_ctx(func, grad, h_diag, n_param, &
+                                                obj_func, hess_x_funptr, context, &
+                                                settings, trust_radius, solution, &
+                                                imicro, max_precision_reached, error)
+        !
+        ! this subroutine performs truncated conjugate gradient to solve the trust 
+        ! region subproblem, its callback functions receive an opaque host context as
+        ! their first argument
+        !
+        real(rp), intent(in) :: func, grad(:), h_diag(:)
+        integer(ip), intent(in) :: n_param
+        procedure(obj_func_ctx_type), pointer, intent(in) :: obj_func
+        procedure(hess_x_ctx_type), pointer, intent(in) :: hess_x_funptr
+        class(*), intent(inout), target :: context
         type(solver_settings_type), intent(in) :: settings
         real(rp), intent(inout) :: trust_radius
         real(rp), intent(out) :: solution(:)
@@ -2342,7 +2914,8 @@ contains
         initial_residual_norm = dnrm2(n_param, residual, 1_ip)
 
         ! initialize preconditioned residual and direction
-        call abs_diag_precond(residual, h_diag, precond_residual, settings, error)
+        call abs_diag_precond(residual, h_diag, precond_residual, settings, error, &
+                              context=context)
         if (error /= 0) return
 
         direction = -precond_residual
@@ -2357,7 +2930,7 @@ contains
         micro_converged = .false.
         do imicro = 1, settings%n_micro - 1
             ! get Hessian linear transformation of direction
-            call hess_x_funptr(direction, hess_direction, error)
+            call hess_x_funptr(context, direction, hess_direction, error)
             call add_error_origin(error, error_hess_x, settings)
             if (error /= 0) return
 
@@ -2372,9 +2945,11 @@ contains
                              curvature
 
             ! precondition current solution and direction
-            call abs_diag_precond(solution, h_diag, precond_solution, settings, error)
+            call abs_diag_precond(solution, h_diag, precond_solution, settings, &
+                                  error, context=context)
             if (error /= 0) return
-            call abs_diag_precond(direction, h_diag, precond_direction, settings, error)
+            call abs_diag_precond(direction, h_diag, precond_direction, settings, &
+                                  error, context=context)
             if (error /= 0) return
 
             ! calculate dot products
@@ -2426,7 +3001,7 @@ contains
             ! get residual for model
             residual_new = residual + step_size * hess_direction
             call abs_diag_precond(residual_new, h_diag, precond_residual_new, &
-                                  settings, error)
+                                  settings, error, context=context)
             if (error /= 0) return
 
             ! check for linear or superlinear (in this case quadratic) convergence
@@ -2453,7 +3028,7 @@ contains
                    residual_new, precond_residual_new)
 
         ! evaluate function at predicted point
-        new_func = obj_func(solution, error)
+        new_func = obj_func(context, solution, error)
         call add_error_origin(error, error_obj_func, settings)
         if (error /= 0) return
 
@@ -2473,7 +3048,7 @@ contains
 
                 ! check if step exceeds new trust region boundary
                 call abs_diag_precond(solution, h_diag, precond_solution, settings, &
-                                      error)
+                                      error, context=context)
                 if (error /= 0) return
 
                 if (ddot(n_param, solution, 1_ip, precond_solution, 1_ip) > &
@@ -2481,7 +3056,8 @@ contains
                     ! find step that exceeds trust region boundary
                     do i = 1, size(solutions, 2)
                         call abs_diag_precond(solutions(:, i), h_diag, &
-                                              precond_solution, settings, error)
+                                              precond_solution, settings, error, &
+                                              context=context)
                         if (error /= 0) return
 
                         if (ddot(n_param, solutions(:, i), 1_ip, precond_solution, &
@@ -2495,11 +3071,13 @@ contains
                             hess_direction = h_solutions(:, i) - h_solutions(:, i - 1)
 
                             ! precondition current solution and direction
-                            call abs_diag_precond(solution, h_diag, precond_solution, &
-                                                  settings, error)
+                            call abs_diag_precond(solution, h_diag, &
+                                                  precond_solution, settings, error, &
+                                                  context=context)
                             if (error /= 0) return
                             call abs_diag_precond(direction, h_diag, &
-                                                  precond_direction, settings, error)
+                                                  precond_direction, settings, &
+                                                  error, context=context)
                             if (error /= 0) return
 
                             ! calculate dot products
@@ -2522,7 +3100,7 @@ contains
                             h_solution = h_solution + step_size * hess_direction
 
                             ! evaluate function at predicted point
-                            new_func = obj_func(solution, error)
+                            new_func = obj_func(context, solution, error)
                             call add_error_origin(error, error_obj_func, settings)
                             if (error /= 0) return
 
@@ -2551,7 +3129,7 @@ contains
         deallocate(h_solution, solutions, h_solutions, direction, hess_direction, &
                    precond_solution, precond_direction)
 
-    end subroutine truncated_conjugate_gradient
+    end subroutine truncated_conjugate_gradient_ctx
 
     logical function accept_trust_region_step(solution, ratio, micro_converged, &
                                               settings, trust_radius, &
@@ -2654,8 +3232,8 @@ contains
         end if
 
         ! check whether projection functions is passed
-        if (associated(settings%project)) call settings%log(project_warning_msg, &
-                                                            verbosity_warning)
+        if (associated(settings%project) .or. associated(settings%project_ctx)) &
+            call settings%log(project_warning_msg, verbosity_warning)
 
     end subroutine solver_sanity_check
 
@@ -2693,8 +3271,8 @@ contains
         end if
 
         ! check whether projection functions is passed
-        if (associated(settings%project)) call settings%log(project_warning_msg, &
-                                                            verbosity_warning)
+        if (associated(settings%project) .or. associated(settings%project_ctx)) &
+            call settings%log(project_warning_msg, verbosity_warning)
 
     end subroutine stability_sanity_check
 

@@ -127,6 +127,71 @@ call solver(update_orbs_funptr, obj_func_funptr, n_param, error, settings)
 
 ---
 
+The callback functions above receive no host data, so a host program has to reach its own data through module-level variables. The `solver_ctx` entry point therefore accepts an opaque context which is handed to every callback function as its first argument. The context is an unlimited polymorphic argument, so it can be any type the host program defines, and the callback functions recover it with `select type`:
+
+```fortran
+use opentrustregion, only: ip, rp, update_orbs_ctx_type, obj_func_ctx_type, &
+                           hess_x_ctx_type, solver_settings_type, solver_ctx
+
+! host derived type holding everything the callback functions need
+type :: host_type
+    real(rp), allocatable :: mo_coeff(:, :), ints(:, :)
+end type
+
+type(host_type), target :: host
+procedure(update_orbs_ctx_type), pointer :: update_orbs_funptr
+procedure(obj_func_ctx_type), pointer :: obj_func_funptr
+integer(ip) :: n_param, error
+type(solver_settings_type) :: settings
+
+! set callback function pointers to existing implementations
+update_orbs_funptr => update_orbs
+obj_func_funptr => obj_func
+
+! initialize settings
+call settings%init(error)
+
+! run solver with the host data supplied through the context
+call solver_ctx(update_orbs_funptr, obj_func_funptr, host, n_param, error, settings)
+```
+
+The callback functions have the same arguments as before, preceded by the context:
+
+```fortran
+subroutine update_orbs(context, kappa, func, grad, h_diag, hess_x_funptr, error)
+    class(*), intent(inout), target :: context
+    real(rp), intent(in), target :: kappa(:)
+    real(rp), intent(out) :: func
+    real(rp), intent(out), target :: grad(:), h_diag(:)
+    procedure(hess_x_ctx_type), intent(out), pointer :: hess_x_funptr
+    integer(ip), intent(out) :: error
+
+    ! initialize error flag
+    error = 0
+
+    ! recover the host data from the context
+    select type (host => context)
+    type is (host_type)
+        ! apply the variable update to host%mo_coeff and evaluate func, grad and
+        ! h_diag from host%mo_coeff and host%ints
+    class default
+        error = 1
+        return
+    end select
+
+    ! the Hessian linear transformation is itself context-carrying
+    hess_x_funptr => hess_x
+
+end subroutine update_orbs
+```
+
+- The context is passed to `solver_ctx` as an argument and is never stored in the settings object, so concurrent solves do not share state.
+- The abstract interfaces `update_orbs_ctx_type`, `obj_func_ctx_type`, `hess_x_ctx_type`, `precond_ctx_type`, `project_ctx_type`, and `conv_check_ctx_type` describe the context-carrying callback functions. The logging function needs no host data and therefore has no context-carrying counterpart.
+- The optional callback functions are supplied as the `precond_ctx`, `project_ctx`, and `conv_check_ctx` settings instead of `precond`, `project`, and `conv_check`. Setting both flavours of the same callback function is refused with an error rather than silently resolved.
+- `solver` is a thin adapter which bundles the callback functions of the plain interfaces into a context and calls `solver_ctx`, so both entry points run the same algorithm.
+
+---
+
 The following C snippet demonstrates the equivalent usage through the C interface:
 
 ```c
@@ -186,6 +251,7 @@ The optimization process can be fine-tuned using the following settings:
 - **`precond`** (subroutine): Applies a preconditioner to a residual vector. Writes the result in-place into a provided array and returns an integer error code (0 for success, positive integers < 100 for errors).
 - **`project`** (subroutine): Applies a projection in-place to a provided vector and returns an integer error code (0 for success, positive integers < 100 for errors). Required for optimization using non-redundant parameters. When this is used, all other passed routines (`update_orbs`, `hess_x`, and `precond`) must be self-projecting.
 - **`conv_check`** (function): Returns whether the optimization has converged due to some supplied convergence criterion. Additionally, outputs an integer code indicating the success or failure of the function, positive integers less than 100 represent error conditions.
+- **`precond_ctx`**, **`project_ctx`**, **`conv_check_ctx`** (subroutine/function): Context-carrying counterparts of `precond`, `project`, and `conv_check`, which receive the context passed to `solver_ctx` as their first argument. Only one flavour of each callback function can be set.
 - **`stability`** (boolean): Determines whether a stability check is performed upon convergence.
 - **`line_search`** (boolean): Determines whether a line search is performed after every macro iteration.
 - **`subsystem_solver`** (string): Specifies which subsystem solver to use. Options include:
@@ -203,7 +269,7 @@ The optimization process can be fine-tuned using the following settings:
 - **`verbose`** (integer): Controls the verbosity of output during optimization.
 - **`seed`** (integer): Seed value for generating random trial vectors.
 - **`logger`** (subroutine): Accepts a log message. Logging is otherwise routed to stdout.
-- **`stability_settings`** (stability_settings_type): Settings object controlling the internal stability check that is automatically performed upon convergence when `stability` is `True` or when starting at a stationary point (see the Stability Check section below). If `stability_settings%precond`, `stability_settings%project`, or `stability_settings%logger` are left unset, they default to the corresponding `precond`, `project`, and `logger` supplied to `solver`. `stability_settings%verbose` is raised to at least the solver's own `verbose` level.
+- **`stability_settings`** (stability_settings_type): Settings object controlling the internal stability check that is automatically performed upon convergence when `stability` is `True` or when starting at a stationary point (see the Stability Check section below). If `stability_settings%precond`, `stability_settings%project`, `stability_settings%precond_ctx`, `stability_settings%project_ctx`, or `stability_settings%logger` are left unset, they default to the corresponding `precond`, `project`, `precond_ctx`, `project_ctx`, and `logger` supplied to `solver`. `stability_settings%verbose` is raised to at least the solver's own `verbose` level.
 
 ## Stability Check
 A separate `stability_check` subroutine is available to verify whether the current solution corresponds to a minimum. If not, it returns a boolean indicating instability and optionally, writes the eigenvector corresponding to the negative eigenvalue in-place to the provided memory.
@@ -252,6 +318,35 @@ call stability_check(h_diag, hess_x_funptr, n_param, stable, error, settings, ka
 - Stability settings are initialized via the `init()` method of the derived type and can be overridden (here, `conv_tol` and `n_iter`).
 - The `stable` logical output receives the result of the stability check.
 - The descent direction `kappa` is optional and is only returned if provided.
+
+---
+
+As for the solver, a `stability_check_ctx` entry point accepts an opaque context which is handed to the Hessian linear transformation as its first argument:
+
+```fortran
+use opentrustregion, only: ip, rp, stability_settings_type, hess_x_ctx_type, &
+                           stability_check_ctx
+
+type(host_type), target :: host
+real(rp), allocatable :: h_diag(:), kappa(:)
+procedure(hess_x_ctx_type), pointer :: hess_x_funptr
+integer(ip) :: error
+logical :: stable
+type(stability_settings_type) :: settings
+
+! set callback function pointer to existing implementation
+hess_x_funptr => hess_x
+
+! initialize settings
+call settings%init(error)
+
+! run stability check with the host data supplied through the context
+call stability_check_ctx(h_diag, hess_x_funptr, host, stable, error, settings, &
+                         kappa=kappa)
+```
+
+- The callback function has the same arguments as the one of the plain `hess_x_type` interface, preceded by `class(*), intent(inout), target :: context`, and recovers the host data with `select type`.
+- The optional `precond` and `project` callback functions are supplied as the `precond_ctx` and `project_ctx` settings, as described for the solver above.
 
 ---
 
@@ -323,6 +418,7 @@ The stability check can be fine-tuned using the following settings:
 
 - **`precond`** (subroutine): Applies a preconditioner to a residual vector. Writes the result in-place into a provided array and returns an integer error code (0 for success, positive integers < 100 for errors).
 - **`project`** (subroutine): Applies a projection in-place to a provided vector and returns an integer error code (0 for success, positive integers < 100 for errors). Required for stability check using non-redundant parameters. When this is used, all other passed routines (`hess_x` and `precond`) must be self-projecting.
+- **`precond_ctx`**, **`project_ctx`** (subroutine): Context-carrying counterparts of `precond` and `project`, which receive the context passed to `stability_check_ctx` as their first argument. Only one flavour of each callback function can be set.
 - **`diag_solver`** (string): Specifies which diagonalization solver to use. Options include:
   - `"davidson"`: standard Davidson method,
   - `"jacobi-davidson"`: Davidson method with fallback to Jacobi-Davidson if convergence is difficult, or automatically after `jacobi_davidson_start` micro iterations.
